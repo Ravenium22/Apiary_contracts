@@ -1,0 +1,10 @@
+{
+  "extends": "solhint:recommended",
+  "rules": {
+    "compiler-version": false,
+    "no-empty-blocks": false,
+    "no-console": false,
+    "not-rely-on-time": false,
+    "max-states-count": false
+  }
+}

@@ -1,0 +1,35 @@
+[profile.default]
+src = 'src'
+out = 'out'
+optimizer = false
+evm_version = 'shanghai'
+auto_detect_solc = true
+libs = ["node_modules", "lib"]
+
+[fuzz]
+runs = 1024
+
+
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = true
+
+
+[rpc_endpoints]
+berachain = "${BERACHAIN_RPC_URL}"
+bepolia = "${BEPOLIA_RPC_URL}"
+
+[etherscan.berascan]
+key = "${BERASCAN_API_KEY}"
+url = "https://api.berascan.com/api"
+chain = 80094
+
+[etherscan.bepoliascan]
+key = "${BEPOLIASCAN_API_KEY}"
+url = "https://api.bepoliascan.com/api"
+chain = 80069
+
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
