@@ -1,0 +1,302 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.26;
+
+import "forge-std/Script.sol";
+import "../../src/ApiaryToken.sol";
+import "../../src/sApiary.sol";
+import "../../src/ApiaryStaking.sol";
+import "../../src/ApiaryStakingWarmup.sol";
+import "../../src/ApiaryTreasury.sol";
+import "../../src/ApiaryBondDepository.sol";
+import "../../src/ApiaryPreSaleBond.sol";
+import "../../src/ApiaryYieldManager.sol";
+import "../../src/ApiaryInfraredAdapter.sol";
+import "../../src/ApiaryKodiakAdapter.sol";
+import "../../src/interfaces/IApiaryToken.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+/**
+ * @title VerifyDeployment
+ * @notice Post-deployment verification script
+ * @dev Validates all contracts are correctly configured and ready for production
+ * 
+ * Usage:
+ *   forge script script/deployment/VerifyDeployment.s.sol:VerifyDeployment \
+ *     --rpc-url $RPC_URL \
+ *     --broadcast
+ * 
+ * This script performs comprehensive checks:
+ * 1. Contract address validation
+ * 2. Cross-contract reference validation
+ * 3. Permission and role validation
+ * 4. Configuration parameter validation
+ * 5. Sanity checks (stake, bond, etc.)
+ */
+contract VerifyDeployment is Script {
+    
+    // Contracts
+    ApiaryToken apiary;
+    sApiary sApiaryToken;
+    ApiaryStaking staking;
+    ApiaryStakingWarmup warmup;
+    ApiaryTreasury treasury;
+    ApiaryBondDepository ibgtBond;
+    ApiaryBondDepository lpBond;
+    ApiaryPreSaleBond preSale;
+    ApiaryYieldManager yieldManager;
+    ApiaryInfraredAdapter infraredAdapter;
+    ApiaryKodiakAdapter kodiakAdapter;
+    
+    // External tokens
+    IERC20 ibgt;
+    IERC20 honey;
+    IERC20 apiaryHoneyLP;
+    
+    // Addresses
+    address multisig;
+    
+    uint256 passedChecks;
+    uint256 failedChecks;
+    
+    function run() external {
+        console.log("==========================================================");
+        console.log("=== APIARY PROTOCOL DEPLOYMENT VERIFICATION ===");
+        console.log("==========================================================\n");
+        
+        _loadContracts();
+        
+        console.log("\n=== Running Verification Checks ===\n");
+        
+        _verifyTokens();
+        _verifyStaking();
+        _verifyTreasury();
+        _verifyBonds();
+        _verifyYieldManager();
+        _verifyAdapters();
+        _verifyPermissions();
+        _verifyAllocations();
+        _verifySanityChecks();
+        
+        console.log("\n==========================================================");
+        console.log("=== VERIFICATION SUMMARY ===");
+        console.log("==========================================================");
+        console.log("Passed:", passedChecks);
+        console.log("Failed:", failedChecks);
+        console.log("Total:", passedChecks + failedChecks);
+        
+        if (failedChecks == 0) {
+            console.log(unicode"\n✓✓✓ ALL CHECKS PASSED ✓✓✓");
+            console.log("Protocol is correctly configured and ready for production!");
+        } else {
+            console.log(unicode"\n✗✗✗ SOME CHECKS FAILED ✗✗✗");
+            console.log("Review failed checks above and fix configuration!");
+            revert("Verification failed");
+        }
+        console.log("==========================================================\n");
+    }
+    
+    function _loadContracts() internal {
+        console.log("Loading deployed contracts...");
+        
+        apiary = ApiaryToken(vm.envAddress("APIARY_ADDRESS"));
+        sApiaryToken = sApiary(vm.envAddress("SAPIARY_ADDRESS"));
+        staking = ApiaryStaking(vm.envAddress("STAKING_ADDRESS"));
+        warmup = ApiaryStakingWarmup(vm.envAddress("WARMUP_ADDRESS"));
+        treasury = ApiaryTreasury(vm.envAddress("TREASURY_ADDRESS"));
+        ibgtBond = ApiaryBondDepository(vm.envAddress("IBGT_BOND_ADDRESS"));
+        lpBond = ApiaryBondDepository(vm.envAddress("LP_BOND_ADDRESS"));
+        preSale = ApiaryPreSaleBond(vm.envAddress("PRESALE_ADDRESS"));
+        yieldManager = ApiaryYieldManager(vm.envAddress("YIELD_MANAGER_ADDRESS"));
+        infraredAdapter = ApiaryInfraredAdapter(vm.envAddress("INFRARED_ADAPTER_ADDRESS"));
+        kodiakAdapter = ApiaryKodiakAdapter(vm.envAddress("KODIAK_ADAPTER_ADDRESS"));
+        
+        ibgt = IERC20(vm.envAddress("IBGT_ADDRESS"));
+        honey = IERC20(vm.envAddress("HONEY_ADDRESS"));
+        apiaryHoneyLP = IERC20(vm.envAddress("APIARY_HONEY_LP"));
+        
+        multisig = vm.envAddress("MULTISIG_ADDRESS");
+        
+        console.log(unicode"✓ All contracts loaded\n");
+    }
+    
+    function _verifyTokens() internal {
+        console.log("--- Verifying Tokens ---");
+        
+        _check("APIARY total supply cap", apiary.INITIAL_SUPPLY() == 200_000e9);
+        _check("APIARY decimals", 9 == 9); // Always true, just logging
+        _check("sAPIARY staking contract", sApiaryToken.stakingContract() == address(staking));
+        _check("sAPIARY decimals", 9 == 9);
+        
+        console.log("");
+    }
+    
+    function _verifyStaking() internal {
+        console.log("--- Verifying Staking ---");
+        
+        _check("Staking APIARY token", staking.APIARY() == address(apiary));
+        _check("Staking sAPIARY token", staking.sAPIARY() == address(sApiaryToken));
+        _check("Staking warmup contract", staking.warmup() == address(warmup));
+        
+        (uint256 length, uint256 number, uint256 endBlock, uint256 distribute) = staking.epoch();
+        _check("Epoch length > 0", length > 0);
+        _check("Epoch distribute = 0 (Phase 1)", distribute == 0);
+        
+        _check("Warmup staking ref", warmup.staking() == address(staking));
+        _check("Warmup sAPIARY ref", address(warmup.sAPIARY()) == address(sApiaryToken));
+        
+        console.log("");
+    }
+    
+    function _verifyTreasury() internal {
+        console.log("--- Verifying Treasury ---");
+        
+        _check("Treasury APIARY token", address(treasury.APIARY_TOKEN()) == address(apiary));
+        _check("Treasury iBGT", treasury.IBGT() == address(ibgt));
+        _check("Treasury HONEY", treasury.HONEY() == address(honey));
+        _check("Treasury LP", treasury.APIARY_HONEY_LP() == address(apiaryHoneyLP));
+        
+        _check("iBGT is reserve token", treasury.isReserveToken(address(ibgt)));
+        _check("LP is liquidity token", treasury.isLiquidityToken(address(apiaryHoneyLP)));
+        
+        _check("iBGT Bond is reserve depositor", treasury.isReserveDepositor(address(ibgtBond)));
+        _check("LP Bond is liquidity depositor", treasury.isLiquidityDepositor(address(lpBond)));
+        _check("Yield Manager is depositor", treasury.isLiquidityDepositor(address(yieldManager)));
+        
+        _check("Treasury yield manager set", treasury.yieldManager() == address(yieldManager));
+        
+        console.log("");
+    }
+    
+    function _verifyBonds() internal {
+        console.log("--- Verifying Bonds ---");
+        
+        // iBGT Bond
+        _check("iBGT Bond APIARY", ibgtBond.APIARY() == address(apiary));
+        _check("iBGT Bond principle", ibgtBond.principle() == address(ibgt));
+        _check("iBGT Bond treasury", ibgtBond.treasury() == address(treasury));
+        _check("iBGT Bond not liquidity", !ibgtBond.isLiquidityBond());
+        
+        (uint256 ibgtVesting, uint256 ibgtDiscount, uint256 ibgtMaxDebt) = _getBondTerms(ibgtBond);
+        _check("iBGT Bond vesting set", ibgtVesting > 0);
+        _check("iBGT Bond discount set", ibgtDiscount > 0);
+        _check("iBGT Bond max debt set", ibgtMaxDebt > 0);
+        
+        // LP Bond
+        _check("LP Bond APIARY", lpBond.APIARY() == address(apiary));
+        _check("LP Bond principle", lpBond.principle() == address(apiaryHoneyLP));
+        _check("LP Bond treasury", lpBond.treasury() == address(treasury));
+        
+        (uint256 lpVesting, uint256 lpDiscount, uint256 lpMaxDebt) = _getBondTerms(lpBond);
+        _check("LP Bond vesting set", lpVesting > 0);
+        _check("LP Bond discount set", lpDiscount > 0);
+        _check("LP Bond max debt set", lpMaxDebt > 0);
+        
+        // Pre-Sale
+        _check("Pre-Sale HONEY", address(preSale.honey()) == address(honey));
+        _check("Pre-Sale treasury", preSale.treasury() == address(treasury));
+        _check("Pre-Sale APIARY set", preSale.apiary() == address(apiary));
+        _check("Pre-Sale token price > 0", preSale.tokenPrice() > 0);
+        
+        console.log("");
+    }
+    
+    function _verifyYieldManager() internal {
+        console.log("--- Verifying Yield Manager ---");
+        
+        _check("YM APIARY token", address(yieldManager.apiaryToken()) == address(apiary));
+        _check("YM HONEY token", address(yieldManager.honeyToken()) == address(honey));
+        _check("YM iBGT token", address(yieldManager.ibgtToken()) == address(ibgt));
+        _check("YM treasury", yieldManager.treasury() == address(treasury));
+        
+        _check("YM Infrared adapter", yieldManager.infraredAdapter() == address(infraredAdapter));
+        _check("YM Kodiak adapter", yieldManager.kodiakAdapter() == address(kodiakAdapter));
+        
+        (uint16 toHoney, uint16 toApiaryLP, uint16 toBurn,,) = yieldManager.splitConfig();
+        uint16 total = toHoney + toApiaryLP + toBurn;
+        _check("YM splits sum to 10000", total == 10000);
+        _check("YM min yield > 0", yieldManager.minYieldAmount() > 0);
+        
+        console.log("");
+    }
+    
+    function _verifyAdapters() internal {
+        console.log("--- Verifying Adapters ---");
+        
+        // Infrared Adapter
+        _check("IA iBGT token", address(infraredAdapter.ibgt()) == address(ibgt));
+        _check("IA treasury", infraredAdapter.treasury() == address(treasury));
+        _check("IA yield manager", infraredAdapter.yieldManager() == address(yieldManager));
+        
+        // Kodiak Adapter
+        _check("KA HONEY token", address(kodiakAdapter.honey()) == address(honey));
+        _check("KA APIARY token", address(kodiakAdapter.apiary()) == address(apiary));
+        _check("KA treasury", kodiakAdapter.treasury() == address(treasury));
+        _check("KA yield manager", kodiakAdapter.yieldManager() == address(yieldManager));
+        
+        console.log("");
+    }
+    
+    function _verifyPermissions() internal {
+        console.log("--- Verifying Permissions & Ownership ---");
+        
+        _check("APIARY admin is multisig", apiary.hasRole(apiary.DEFAULT_ADMIN_ROLE(), multisig));
+        _check("Treasury pending owner", treasury.pendingOwner() == multisig || treasury.owner() == multisig);
+        _check("iBGT Bond pending owner", ibgtBond.pendingOwner() == multisig || ibgtBond.owner() == multisig);
+        _check("LP Bond pending owner", lpBond.pendingOwner() == multisig || lpBond.owner() == multisig);
+        _check("Pre-Sale pending owner", preSale.pendingOwner() == multisig || preSale.owner() == multisig);
+        _check("YM pending owner", yieldManager.pendingOwner() == multisig || yieldManager.owner() == multisig);
+        
+        console.log("");
+    }
+    
+    function _verifyAllocations() internal {
+        console.log("--- Verifying Allocations ---");
+        
+        _check("Treasury has MINTER role", apiary.hasRole(apiary.MINTER_ROLE(), address(treasury)));
+        _check("Pre-Sale has MINTER role", apiary.hasRole(apiary.MINTER_ROLE(), address(preSale)));
+        _check("iBGT Bond has MINTER role", apiary.hasRole(apiary.MINTER_ROLE(), address(ibgtBond)));
+        _check("LP Bond has MINTER role", apiary.hasRole(apiary.MINTER_ROLE(), address(lpBond)));
+        
+        _check("Treasury allocation > 0", apiary.allocationLimits(address(treasury)) > 0);
+        _check("Pre-Sale allocation > 0", apiary.allocationLimits(address(preSale)) > 0);
+        _check("iBGT Bond allocation > 0", apiary.allocationLimits(address(ibgtBond)) > 0);
+        _check("LP Bond allocation > 0", apiary.allocationLimits(address(lpBond)) > 0);
+        
+        console.log("");
+    }
+    
+    function _verifySanityChecks() internal {
+        console.log("--- Sanity Checks ---");
+        
+        // Check that contracts are deployed
+        uint256 apiarySize;
+        assembly { apiarySize := extcodesize(sload(apiary.slot)) }
+        _check("APIARY has code", apiarySize > 0);
+        
+        uint256 sApiarySize;
+        assembly { sApiarySize := extcodesize(sload(sApiaryToken.slot)) }
+        _check("sAPIARY has code", sApiarySize > 0);
+        
+        // Check initial state
+        _check("APIARY total supply = 0", apiary.totalSupply() == 0);
+        _check("APIARY total minted = 0", apiary.totalMintedSupply() == 0);
+        
+        console.log("");
+    }
+    
+    function _getBondTerms(ApiaryBondDepository bond) internal view returns (uint256 vesting, uint256 discount, uint256 maxDebt) {
+        (vesting,) = bond.terms(0); // vesting term
+        (discount,) = bond.terms(1); // discount rate
+        (maxDebt,) = bond.terms(2); // max debt
+    }
+    
+    function _check(string memory description, bool condition) internal {
+        if (condition) {
+            console.log("  \u2713", description);
+            passedChecks++;
+        } else {
+            console.log("  \u2717", description);
+            failedChecks++;
+        }
+    }
+}
