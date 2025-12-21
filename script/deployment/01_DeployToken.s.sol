@@ -36,18 +36,17 @@ contract DeployToken is Script {
         
         console.log("\n=== APIARY Token Deployed ===");
         console.log("APIARY:", address(apiary));
-        console.log("Total Supply:", apiary.INITIAL_SUPPLY() / 1e9, "APIARY");
-        console.log("Decimals:", 9);
+        console.log("Supply Model: Uncapped (per-minter allocation limits)");
+        console.log("Decimals: 9");
         console.log("Admin:", deployer);
         
         // Sanity checks
         require(apiary.hasRole(apiary.DEFAULT_ADMIN_ROLE(), deployer), "Admin role not set");
         require(apiary.totalSupply() == 0, "Supply should be 0 initially");
-        require(apiary.INITIAL_SUPPLY() == 200_000e9, "Total supply cap incorrect");
         
         console.log(unicode"\n✓ APIARY token deployment successful!");
         console.log(unicode"✓ Admin role verified");
-        console.log(unicode"✓ Supply cap verified: 200,000 APIARY");
+        console.log(unicode"✓ Initial supply: 0 (mint via allocation limits)");
         
         return address(apiary);
     }

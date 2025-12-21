@@ -21,7 +21,7 @@ import { Test } from "forge-std/Test.sol";
 import { ApiaryKodiakAdapter } from "../src/ApiaryKodiakAdapter.sol";
 import { IKodiakRouter } from "../src/interfaces/IKodiakRouter.sol";
 import { IKodiakFactory } from "../src/interfaces/IKodiakFactory.sol";
-import { IKodiakGauge } from "../src/interfaces/IKodiakGauge.sol";
+import { IKodiakFarm } from "../src/interfaces/IKodiakFarm.sol";
 import { IKodiakPair } from "../src/interfaces/IKodiakPair.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -337,111 +337,266 @@ contract MockKodiakRouter is IKodiakRouter {
     }
 }
 
-contract MockKodiakGauge is IKodiakGauge {
+contract MockKodiakFarm is IKodiakFarm {
     address public stakingTokenAddress;
     address[] public rewardTokensArray;
+    uint256[] public rewardRatesArray;
     
-    mapping(address => uint256) public balances;
-    mapping(address => mapping(address => uint256)) public earnedRewards;
-    uint256 public totalStaked;
+    // Stake tracking
+    mapping(address => LockedStake[]) internal userStakes;
+    mapping(address => uint256) public lockedLiquidityByUser;
+    mapping(address => uint256) public combinedWeightByUser;
+    mapping(address => uint256[]) public earnedByUser;
+    
+    uint256 public totalLockedLiquidity;
+    uint256 public nonce;
+    
+    // Config
+    uint256 public minLockTime = 7 days;
+    uint256 public maxLockTime = 365 days;
+    uint256 public maxMultiplier = 3e18; // 3x
+    bool public isPaused;
+    bool public isRewardsPaused;
+    bool public isUnlocked;
+    uint256 public periodFinishTime;
     
     constructor(address _stakingToken, address[] memory _rewardTokens) {
         stakingTokenAddress = _stakingToken;
         rewardTokensArray = _rewardTokens;
+        rewardRatesArray = new uint256[](_rewardTokens.length);
+        for (uint256 i = 0; i < _rewardTokens.length; i++) {
+            rewardRatesArray[i] = 1e18; // 1 token per second
+        }
+        periodFinishTime = block.timestamp + 365 days;
     }
     
-    function stake(uint256 amount) external {
-        IERC20(stakingTokenAddress).transferFrom(msg.sender, address(this), amount);
-        balances[msg.sender] += amount;
-        totalStaked += amount;
-        emit Staked(msg.sender, amount);
+    function stakeLocked(uint256 liquidity, uint256 secs) external returns (bytes32 kek_id) {
+        require(!isPaused, "Staking paused");
+        require(secs >= minLockTime, "Lock too short");
+        
+        IERC20(stakingTokenAddress).transferFrom(msg.sender, address(this), liquidity);
+        
+        // Generate unique kek_id
+        nonce++;
+        kek_id = keccak256(abi.encodePacked(msg.sender, block.timestamp, nonce));
+        
+        // Calculate multiplier
+        uint256 multiplier = lockMultiplier(secs);
+        
+        // Create stake
+        LockedStake memory stake = LockedStake({
+            kek_id: kek_id,
+            start_timestamp: block.timestamp,
+            liquidity: liquidity,
+            ending_timestamp: block.timestamp + secs,
+            lock_multiplier: multiplier
+        });
+        
+        userStakes[msg.sender].push(stake);
+        lockedLiquidityByUser[msg.sender] += liquidity;
+        combinedWeightByUser[msg.sender] += (liquidity * multiplier) / 1e18;
+        totalLockedLiquidity += liquidity;
+        
+        emit StakeLocked(msg.sender, liquidity, secs, kek_id, msg.sender);
     }
     
-    function stakeFor(uint256 amount, address recipient) external {
-        IERC20(stakingTokenAddress).transferFrom(msg.sender, address(this), amount);
-        balances[recipient] += amount;
-        totalStaked += amount;
-        emit Staked(recipient, amount);
+    function withdrawLocked(bytes32 kek_id) external {
+        LockedStake[] storage stakes = userStakes[msg.sender];
+        bool found = false;
+        uint256 liquidity;
+        
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (stakes[i].kek_id == kek_id) {
+                require(isUnlocked || block.timestamp >= stakes[i].ending_timestamp, "Stake not expired");
+                
+                liquidity = stakes[i].liquidity;
+                uint256 multiplier = stakes[i].lock_multiplier;
+                
+                // Remove stake (swap with last and pop)
+                stakes[i] = stakes[stakes.length - 1];
+                stakes.pop();
+                
+                lockedLiquidityByUser[msg.sender] -= liquidity;
+                combinedWeightByUser[msg.sender] -= (liquidity * multiplier) / 1e18;
+                totalLockedLiquidity -= liquidity;
+                
+                found = true;
+                break;
+            }
+        }
+        
+        require(found, "Stake not found");
+        
+        IERC20(stakingTokenAddress).transfer(msg.sender, liquidity);
+        emit WithdrawLocked(msg.sender, liquidity, kek_id, msg.sender);
     }
     
-    function withdraw(uint256 amount) external {
-        require(balances[msg.sender] >= amount, "Insufficient balance");
-        balances[msg.sender] -= amount;
-        totalStaked -= amount;
-        IERC20(stakingTokenAddress).transfer(msg.sender, amount);
-        emit Withdrawn(msg.sender, amount);
+    function withdrawLockedAll() external {
+        LockedStake[] storage stakes = userStakes[msg.sender];
+        uint256 totalWithdrawn;
+        
+        // Iterate backwards to safely remove
+        for (int256 i = int256(stakes.length) - 1; i >= 0; i--) {
+            uint256 idx = uint256(i);
+            if (isUnlocked || block.timestamp >= stakes[idx].ending_timestamp) {
+                uint256 liquidity = stakes[idx].liquidity;
+                bytes32 kek_id = stakes[idx].kek_id;
+                uint256 multiplier = stakes[idx].lock_multiplier;
+                
+                totalWithdrawn += liquidity;
+                lockedLiquidityByUser[msg.sender] -= liquidity;
+                combinedWeightByUser[msg.sender] -= (liquidity * multiplier) / 1e18;
+                totalLockedLiquidity -= liquidity;
+                
+                // Remove stake
+                stakes[idx] = stakes[stakes.length - 1];
+                stakes.pop();
+                
+                emit WithdrawLocked(msg.sender, liquidity, kek_id, msg.sender);
+            }
+        }
+        
+        if (totalWithdrawn > 0) {
+            IERC20(stakingTokenAddress).transfer(msg.sender, totalWithdrawn);
+        }
     }
     
-    function getReward() external {
+    function withdrawLockedMultiple(bytes32[] calldata kek_ids) external {
+        for (uint256 i = 0; i < kek_ids.length; i++) {
+            this.withdrawLocked(kek_ids[i]);
+        }
+    }
+    
+    function emergencyWithdraw(bytes32 kek_id) external {
+        // Same as withdrawLocked but ignores lock time (with penalty in real impl)
+        LockedStake[] storage stakes = userStakes[msg.sender];
+        
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (stakes[i].kek_id == kek_id) {
+                uint256 liquidity = stakes[i].liquidity;
+                uint256 multiplier = stakes[i].lock_multiplier;
+                
+                stakes[i] = stakes[stakes.length - 1];
+                stakes.pop();
+                
+                lockedLiquidityByUser[msg.sender] -= liquidity;
+                combinedWeightByUser[msg.sender] -= (liquidity * multiplier) / 1e18;
+                totalLockedLiquidity -= liquidity;
+                
+                // In real impl, there would be a penalty
+                IERC20(stakingTokenAddress).transfer(msg.sender, liquidity);
+                emit WithdrawLocked(msg.sender, liquidity, kek_id, msg.sender);
+                return;
+            }
+        }
+        revert("Stake not found");
+    }
+    
+    function getReward() external returns (uint256[] memory rewardAmounts) {
+        require(!isRewardsPaused, "Rewards paused");
+        
+        rewardAmounts = new uint256[](rewardTokensArray.length);
+        
         for (uint256 i = 0; i < rewardTokensArray.length; i++) {
-            uint256 reward = earnedRewards[msg.sender][rewardTokensArray[i]];
+            uint256 reward = earnedByUser[msg.sender].length > i ? earnedByUser[msg.sender][i] : 0;
             if (reward > 0) {
-                earnedRewards[msg.sender][rewardTokensArray[i]] = 0;
+                earnedByUser[msg.sender][i] = 0;
                 IERC20(rewardTokensArray[i]).transfer(msg.sender, reward);
-                emit RewardPaid(msg.sender, rewardTokensArray[i], reward);
+                rewardAmounts[i] = reward;
+                emit RewardPaid(msg.sender, rewardTokensArray[i], reward, msg.sender);
             }
         }
     }
     
-    function getReward(address account) external {
-        for (uint256 i = 0; i < rewardTokensArray.length; i++) {
-            uint256 reward = earnedRewards[account][rewardTokensArray[i]];
-            if (reward > 0) {
-                earnedRewards[account][rewardTokensArray[i]] = 0;
-                IERC20(rewardTokensArray[i]).transfer(account, reward);
-                emit RewardPaid(account, rewardTokensArray[i], reward);
-            }
+    // View functions
+    function lockedLiquidityOf(address account) external view returns (uint256) {
+        return lockedLiquidityByUser[account];
+    }
+    
+    function lockedStakesOf(address account) external view returns (LockedStake[] memory) {
+        return userStakes[account];
+    }
+    
+    function earned(address account) external view returns (uint256[] memory) {
+        if (earnedByUser[account].length == 0) {
+            return new uint256[](rewardTokensArray.length);
         }
+        return earnedByUser[account];
     }
     
-    function exit() external {
-        this.getReward();
-        this.withdraw(balances[msg.sender]);
+    function combinedWeightOf(address account) external view returns (uint256) {
+        return combinedWeightByUser[account];
     }
     
-    function balanceOf(address account) external view returns (uint256) {
-        return balances[account];
+    function lockMultiplier(uint256 secs) public view returns (uint256 multiplier) {
+        if (secs <= minLockTime) {
+            return 1e18; // 1x
+        }
+        if (secs >= maxLockTime) {
+            return maxMultiplier;
+        }
+        // Linear interpolation
+        uint256 range = maxLockTime - minLockTime;
+        uint256 elapsed = secs - minLockTime;
+        uint256 multiplierRange = maxMultiplier - 1e18;
+        multiplier = 1e18 + (multiplierRange * elapsed) / range;
     }
     
-    function totalSupply() external view returns (uint256) {
-        return totalStaked;
+    function getAllRewardTokens() external view returns (address[] memory) {
+        return rewardTokensArray;
     }
     
-    function earned(address account, address rewardToken) external view returns (uint256) {
-        return earnedRewards[account][rewardToken];
+    function getAllRewardRates() external view returns (uint256[] memory) {
+        return rewardRatesArray;
     }
     
     function stakingToken() external view returns (address) {
         return stakingTokenAddress;
     }
     
-    function rewardTokens(uint256 index) external view returns (address) {
-        return rewardTokensArray[index];
+    function lock_time_min() external view returns (uint256) {
+        return minLockTime;
     }
     
-    function rewardTokensLength() external view returns (uint256) {
-        return rewardTokensArray.length;
+    function lock_time_for_max_multiplier() external view returns (uint256) {
+        return maxLockTime;
     }
     
-    function rewardRate(address) external pure returns (uint256) {
-        return 1e18;
+    function lock_max_multiplier() external view returns (uint256) {
+        return maxMultiplier;
     }
     
-    function rewardsDuration() external pure returns (uint256) {
-        return 7 days;
+    function stakingPaused() external view returns (bool) {
+        return isPaused;
     }
     
-    function lastUpdateTime() external view returns (uint256) {
-        return block.timestamp;
+    function rewardsCollectionPaused() external view returns (bool) {
+        return isRewardsPaused;
+    }
+    
+    function stakesUnlocked() external view returns (bool) {
+        return isUnlocked;
+    }
+    
+    function totalLiquidityLocked() external view returns (uint256) {
+        return totalLockedLiquidity;
     }
     
     function periodFinish() external view returns (uint256) {
-        return block.timestamp + 7 days;
+        return periodFinishTime;
     }
     
-    // Test helper
-    function setEarnedRewards(address account, address rewardToken, uint256 amount) external {
-        earnedRewards[account][rewardToken] = amount;
+    // Test helpers
+    function setEarnedRewards(address account, uint256[] memory amounts) external {
+        earnedByUser[account] = amounts;
+    }
+    
+    function setStakesUnlocked(bool unlocked) external {
+        isUnlocked = unlocked;
+    }
+    
+    function setMinLockTime(uint256 _minLockTime) external {
+        minLockTime = _minLockTime;
     }
 }
 
@@ -453,7 +608,7 @@ contract ApiaryKodiakAdapterTest is Test {
     ApiaryKodiakAdapter public adapter;
     MockKodiakRouter public router;
     MockKodiakFactory public factory;
-    MockKodiakGauge public gauge;
+    MockKodiakFarm public farm;
     MockERC20 public honey;
     MockERC20 public apiary;
     MockERC20 public xkdk;
@@ -463,6 +618,11 @@ contract ApiaryKodiakAdapterTest is Test {
     address public yieldManager = address(2);
     address public treasury = address(3);
     address public user = address(4);
+    
+    address public lpToken;
+    
+    // Lock duration for testing (7 days minimum)
+    uint256 public constant TEST_LOCK_DURATION = 7 days;
     
     function setUp() public {
         // Deploy mock tokens
@@ -477,13 +637,13 @@ contract ApiaryKodiakAdapterTest is Test {
         
         // Create APIARY/HONEY pair
         factory.createPair(address(apiary), address(honey));
-        address pairAddress = factory.getPair(address(apiary), address(honey));
+        lpToken = factory.getPair(address(apiary), address(honey));
         
-        // Setup gauge with rewards
+        // Setup farm with rewards
         address[] memory rewardTokens = new address[](2);
         rewardTokens[0] = address(xkdk);
         rewardTokens[1] = address(bgt);
-        gauge = new MockKodiakGauge(pairAddress, rewardTokens);
+        farm = new MockKodiakFarm(lpToken, rewardTokens);
         
         // Deploy adapter
         vm.prank(owner);
@@ -502,15 +662,17 @@ contract ApiaryKodiakAdapterTest is Test {
         apiary.mint(yieldManager, 100000e18);
         honey.mint(address(router), 100000e18);
         apiary.mint(address(router), 100000e18);
-        xkdk.mint(address(gauge), 10000e18);
-        bgt.mint(address(gauge), 10000e18);
+        xkdk.mint(address(farm), 10000e18);
+        bgt.mint(address(farm), 10000e18);
         
         // Setup pair reserves
-        MockKodiakPair(pairAddress).setReserves(50000e18, 50000e18);
+        MockKodiakPair(lpToken).setReserves(50000e18, 50000e18);
         
-        // Register gauge
-        vm.prank(owner);
-        adapter.registerGauge(pairAddress, address(gauge));
+        // Register farm and set lock duration
+        vm.startPrank(owner);
+        adapter.registerFarm(lpToken, address(farm));
+        adapter.setLockDuration(lpToken, TEST_LOCK_DURATION);
+        vm.stopPrank();
     }
     
     /*//////////////////////////////////////////////////////////////
@@ -745,22 +907,86 @@ contract ApiaryKodiakAdapterTest is Test {
         );
         
         // Stake LP
-        address lpToken = factory.getPair(address(apiary), address(honey));
         IERC20(lpToken).approve(address(adapter), liquidity);
         
-        adapter.stakeLP(lpToken, liquidity);
+        bytes32 kekId = adapter.stakeLP(lpToken, liquidity);
         vm.stopPrank();
         
         assertEq(adapter.totalStakedLP(lpToken), liquidity);
-        assertEq(gauge.balanceOf(address(adapter)), liquidity);
+        assertEq(farm.lockedLiquidityOf(address(adapter)), liquidity);
+        assertTrue(adapter.isOurStake(kekId));
+        
+        // Verify stake info
+        bytes32[] memory stakeIds = adapter.getStakeIds(lpToken);
+        assertEq(stakeIds.length, 1);
+        assertEq(stakeIds[0], kekId);
     }
     
-    function testStakeLPRevertsGaugeNotRegistered() public {
+    function testStakeLPRevertsFarmNotRegistered() public {
         MockERC20 fakeLpToken = new MockERC20("FAKE-LP", "FAKE-LP", 18);
         
         vm.prank(yieldManager);
-        vm.expectRevert(ApiaryKodiakAdapter.APIARY__GAUGE_NOT_REGISTERED.selector);
+        vm.expectRevert(ApiaryKodiakAdapter.APIARY__FARM_NOT_REGISTERED.selector);
         adapter.stakeLP(address(fakeLpToken), 100e18);
+    }
+    
+    function testStakeLPRevertsLockDurationNotSet() public {
+        // Create new LP/farm without lock duration set
+        MockERC20 newLpToken = new MockERC20("NEW-LP", "NEW-LP", 18);
+        address[] memory rewards = new address[](1);
+        rewards[0] = address(xkdk);
+        MockKodiakFarm newFarm = new MockKodiakFarm(address(newLpToken), rewards);
+        
+        vm.prank(owner);
+        adapter.registerFarm(address(newLpToken), address(newFarm));
+        // Note: lock duration not set
+        
+        newLpToken.mint(yieldManager, 1000e18);
+        
+        vm.startPrank(yieldManager);
+        newLpToken.approve(address(adapter), 100e18);
+        
+        vm.expectRevert(ApiaryKodiakAdapter.APIARY__LOCK_DURATION_NOT_SET.selector);
+        adapter.stakeLP(address(newLpToken), 100e18);
+        vm.stopPrank();
+    }
+    
+    function testStakeLPWithDifferentLockDurations() public {
+        uint256 amountA = 1000e18;
+        uint256 amountB = 1000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        
+        // Stake half
+        bytes32 kekId1 = adapter.stakeLP(lpToken, liquidity / 2);
+        vm.stopPrank();
+        
+        // Change lock duration
+        vm.prank(owner);
+        adapter.setLockDuration(lpToken, 30 days);
+        
+        // Stake the other half with new duration
+        vm.startPrank(yieldManager);
+        bytes32 kekId2 = adapter.stakeLP(lpToken, liquidity / 2);
+        vm.stopPrank();
+        
+        // Both stakes should exist
+        bytes32[] memory stakeIds = adapter.getStakeIds(lpToken);
+        assertEq(stakeIds.length, 2);
+        assertTrue(kekId1 != kekId2);
     }
     
     function testUnstakeLP() public {
@@ -781,24 +1007,164 @@ contract ApiaryKodiakAdapterTest is Test {
             yieldManager
         );
         
-        address lpToken = factory.getPair(address(apiary), address(honey));
         IERC20(lpToken).approve(address(adapter), liquidity);
-        adapter.stakeLP(lpToken, liquidity);
+        bytes32 kekId = adapter.stakeLP(lpToken, liquidity);
+        vm.stopPrank();
+        
+        // Warp time past lock expiration
+        vm.warp(block.timestamp + TEST_LOCK_DURATION + 1);
         
         // Unstake
-        adapter.unstakeLPTo(lpToken, liquidity, treasury);
-        vm.stopPrank();
+        vm.prank(yieldManager);
+        uint256 unstaked = adapter.unstakeLPTo(lpToken, kekId, treasury);
         
         assertEq(adapter.totalStakedLP(lpToken), 0);
         assertEq(IERC20(lpToken).balanceOf(treasury), liquidity);
+        assertEq(unstaked, liquidity);
+        assertFalse(adapter.isOurStake(kekId));
     }
     
-    function testUnstakeLPRevertsInsufficientStaked() public {
-        address lpToken = factory.getPair(address(apiary), address(honey));
+    function testUnstakeLPRevertsBeforeLockExpires() public {
+        // Setup: Add liquidity and stake
+        uint256 amountA = 1000e18;
+        uint256 amountB = 1000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        bytes32 kekId = adapter.stakeLP(lpToken, liquidity);
+        
+        // Try to unstake before lock expires
+        vm.expectRevert("Stake not expired");
+        adapter.unstakeLPTo(lpToken, kekId, treasury);
+        vm.stopPrank();
+    }
+    
+    function testUnstakeAllExpired() public {
+        // Setup: Add liquidity and create multiple stakes
+        uint256 amountA = 2000e18;
+        uint256 amountB = 2000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        
+        // Create two stakes
+        bytes32 kekId1 = adapter.stakeLP(lpToken, liquidity / 2);
+        bytes32 kekId2 = adapter.stakeLP(lpToken, liquidity / 2);
+        vm.stopPrank();
+        
+        assertEq(adapter.getStakeIds(lpToken).length, 2);
+        
+        // Warp past lock expiration
+        vm.warp(block.timestamp + TEST_LOCK_DURATION + 1);
+        
+        // Unstake all expired
+        vm.prank(yieldManager);
+        uint256 totalUnstaked = adapter.unstakeAllExpiredTo(lpToken, treasury);
+        
+        assertEq(totalUnstaked, liquidity);
+        assertEq(adapter.getStakeIds(lpToken).length, 0);
+        assertEq(adapter.totalStakedLP(lpToken), 0);
+    }
+    
+    function testUnstakeLPRevertsNotOurStake() public {
+        bytes32 fakeKekId = keccak256("fake");
         
         vm.prank(yieldManager);
-        vm.expectRevert(ApiaryKodiakAdapter.APIARY__INSUFFICIENT_LP_STAKED.selector);
-        adapter.unstakeLPTo(lpToken, 1000e18, treasury);
+        vm.expectRevert(ApiaryKodiakAdapter.APIARY__NOT_OUR_STAKE.selector);
+        adapter.unstakeLP(lpToken, fakeKekId);
+    }
+    
+    function testUnstakeLPRemovesFromTracking() public {
+        // Setup: Add liquidity and stake
+        uint256 amountA = 1000e18;
+        uint256 amountB = 1000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        bytes32 kekId = adapter.stakeLP(lpToken, liquidity);
+        vm.stopPrank();
+        
+        // Verify stake is tracked
+        assertTrue(adapter.isOurStake(kekId));
+        assertEq(adapter.stakeIdToLP(kekId), lpToken);
+        assertEq(adapter.getStakeIds(lpToken).length, 1);
+        
+        // Warp and unstake
+        vm.warp(block.timestamp + TEST_LOCK_DURATION + 1);
+        
+        vm.prank(yieldManager);
+        adapter.unstakeLP(lpToken, kekId);
+        
+        // Verify tracking is cleaned up
+        assertFalse(adapter.isOurStake(kekId));
+        assertEq(adapter.stakeIdToLP(kekId), address(0));
+        assertEq(adapter.getStakeIds(lpToken).length, 0);
+    }
+    
+    function testUnstakeAllExpiredNothingExpiredReturnsZero() public {
+        // Setup: Add liquidity and stake
+        uint256 amountA = 1000e18;
+        uint256 amountB = 1000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        adapter.stakeLP(lpToken, liquidity);
+        
+        // Try to unstake expired (nothing expired yet)
+        uint256 unstaked = adapter.unstakeAllExpired(lpToken);
+        vm.stopPrank();
+        
+        assertEq(unstaked, 0);
+        // Stake should still exist
+        assertEq(adapter.getStakeIds(lpToken).length, 1);
     }
     
     function testClaimLPRewards() public {
@@ -819,24 +1185,185 @@ contract ApiaryKodiakAdapterTest is Test {
             yieldManager
         );
         
-        address lpToken = factory.getPair(address(apiary), address(honey));
         IERC20(lpToken).approve(address(adapter), liquidity);
         adapter.stakeLP(lpToken, liquidity);
         
         // Set rewards
-        gauge.setEarnedRewards(address(adapter), address(xkdk), 100e18);
-        gauge.setEarnedRewards(address(adapter), address(bgt), 50e18);
+        uint256[] memory rewardAmounts = new uint256[](2);
+        rewardAmounts[0] = 100e18;
+        rewardAmounts[1] = 50e18;
+        farm.setEarnedRewards(address(adapter), rewardAmounts);
         
         // Claim rewards
-        (address[] memory rewardTokens, uint256[] memory rewardAmounts) = adapter.claimLPRewardsTo(lpToken, treasury);
+        (address[] memory rewardTokens, uint256[] memory amounts) = adapter.claimLPRewardsTo(lpToken, treasury);
         vm.stopPrank();
         
         assertEq(rewardTokens.length, 2);
-        assertEq(rewardAmounts[0], 100e18); // xKDK
-        assertEq(rewardAmounts[1], 50e18); // BGT
+        assertEq(amounts[0], 100e18); // xKDK
+        assertEq(amounts[1], 50e18); // BGT
         assertEq(xkdk.balanceOf(treasury), 100e18);
         assertEq(bgt.balanceOf(treasury), 50e18);
         assertEq(adapter.totalRewardsClaimed(), 1);
+    }
+    
+    function testClaimMultipleRewardTokens() public {
+        // Setup: Add liquidity, stake
+        uint256 amountA = 1000e18;
+        uint256 amountB = 1000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        adapter.stakeLP(lpToken, liquidity);
+        
+        // Set multiple rewards
+        uint256[] memory rewardAmounts = new uint256[](2);
+        rewardAmounts[0] = 200e18; // xKDK
+        rewardAmounts[1] = 100e18; // BGT
+        farm.setEarnedRewards(address(adapter), rewardAmounts);
+        
+        // Claim all rewards
+        (address[] memory tokens, uint256[] memory amounts) = adapter.claimLPRewardsTo(lpToken, treasury);
+        vm.stopPrank();
+        
+        assertEq(tokens.length, 2);
+        assertEq(tokens[0], address(xkdk));
+        assertEq(tokens[1], address(bgt));
+        assertEq(amounts[0], 200e18);
+        assertEq(amounts[1], 100e18);
+    }
+    
+    function testClaimRewardsNoRewardsReturnsEmpty() public {
+        // Setup: Add liquidity and stake, but no rewards
+        uint256 amountA = 1000e18;
+        uint256 amountB = 1000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        adapter.stakeLP(lpToken, liquidity);
+        
+        // No rewards set - claim should return empty/zero amounts
+        (address[] memory tokens, uint256[] memory amounts) = adapter.claimLPRewardsTo(lpToken, treasury);
+        vm.stopPrank();
+        
+        assertEq(tokens.length, 2);
+        assertEq(amounts[0], 0);
+        assertEq(amounts[1], 0);
+    }
+    
+    function testGetExpiredStakes() public {
+        // Setup: Create multiple stakes with same lock duration
+        uint256 amountA = 2000e18;
+        uint256 amountB = 2000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        
+        // Create two stakes
+        adapter.stakeLP(lpToken, liquidity / 2);
+        adapter.stakeLP(lpToken, liquidity / 2);
+        vm.stopPrank();
+        
+        // Check expired before time passes
+        (bytes32[] memory expiredBefore, uint256 liquidityBefore) = adapter.getExpiredStakes(lpToken);
+        assertEq(expiredBefore.length, 0);
+        assertEq(liquidityBefore, 0);
+        
+        // Warp past lock
+        vm.warp(block.timestamp + TEST_LOCK_DURATION + 1);
+        
+        // Check expired after time passes
+        (bytes32[] memory expiredAfter, uint256 liquidityAfter) = adapter.getExpiredStakes(lpToken);
+        assertEq(expiredAfter.length, 2);
+        assertEq(liquidityAfter, liquidity);
+    }
+    
+    function testGetFarmConfig() public {
+        (
+            uint256 minLock,
+            uint256 maxMultiplierLock,
+            uint256 maxMultiplier,
+            bool isPaused,
+            bool areStakesUnlocked
+        ) = adapter.getFarmConfig(lpToken);
+        
+        assertEq(minLock, 7 days);
+        assertEq(maxMultiplierLock, 365 days);
+        assertEq(maxMultiplier, 3e18); // 3x
+        assertFalse(isPaused);
+        assertFalse(areStakesUnlocked);
+    }
+    
+    function testGetLockMultiplier() public {
+        // Minimum lock gets 1x
+        uint256 minMultiplier = adapter.getLockMultiplier(lpToken, 7 days);
+        assertEq(minMultiplier, 1e18);
+        
+        // Max lock gets 3x
+        uint256 maxMultiplier = adapter.getLockMultiplier(lpToken, 365 days);
+        assertEq(maxMultiplier, 3e18);
+    }
+    
+    function testSetLockDuration() public {
+        uint256 newDuration = 14 days;
+        
+        vm.prank(owner);
+        adapter.setLockDuration(lpToken, newDuration);
+        
+        assertEq(adapter.getLockDuration(lpToken), newDuration);
+    }
+    
+    function testSetLockDurationRevertsBelowMinimum() public {
+        vm.prank(owner);
+        vm.expectRevert(ApiaryKodiakAdapter.APIARY__LOCK_DURATION_TOO_SHORT.selector);
+        adapter.setLockDuration(lpToken, 1 days); // Below 7 day minimum
+    }
+    
+    function testSetLockDurationRevertsNonOwner() public {
+        vm.prank(user);
+        vm.expectRevert();
+        adapter.setLockDuration(lpToken, 14 days);
+    }
+    
+    function testStakeLPRevertsNonYieldManager() public {
+        vm.prank(user);
+        vm.expectRevert(ApiaryKodiakAdapter.APIARY__ONLY_YIELD_MANAGER.selector);
+        adapter.stakeLP(lpToken, 100e18);
     }
     
     /*//////////////////////////////////////////////////////////////
@@ -867,16 +1394,18 @@ contract ApiaryKodiakAdapterTest is Test {
         assertEq(adapter.treasury(), newTreasury);
     }
     
-    function testRegisterGauge() public {
+    function testRegisterFarm() public {
         MockERC20 newLpToken = new MockERC20("NEW-LP", "NEW-LP", 18);
         address[] memory rewards = new address[](1);
         rewards[0] = address(xkdk);
-        MockKodiakGauge newGauge = new MockKodiakGauge(address(newLpToken), rewards);
+        MockKodiakFarm newFarm = new MockKodiakFarm(address(newLpToken), rewards);
         
         vm.prank(owner);
-        adapter.registerGauge(address(newLpToken), address(newGauge));
+        adapter.registerFarm(address(newLpToken), address(newFarm));
         
-        assertEq(adapter.lpToGauge(address(newLpToken)), address(newGauge));
+        assertEq(adapter.lpToFarm(address(newLpToken)), address(newFarm));
+        // backward compat alias
+        assertEq(adapter.lpToGauge(address(newLpToken)), address(newFarm));
     }
     
     /*//////////////////////////////////////////////////////////////
@@ -974,7 +1503,6 @@ contract ApiaryKodiakAdapterTest is Test {
             yieldManager
         );
         
-        address lpToken = factory.getPair(address(apiary), address(honey));
         IERC20(lpToken).approve(address(adapter), liquidity);
         adapter.stakeLP(lpToken, liquidity);
         vm.stopPrank();
@@ -1001,20 +1529,125 @@ contract ApiaryKodiakAdapterTest is Test {
             yieldManager
         );
         
-        address lpToken = factory.getPair(address(apiary), address(honey));
         IERC20(lpToken).approve(address(adapter), liquidity);
         adapter.stakeLP(lpToken, liquidity);
         vm.stopPrank();
         
         // Set rewards
-        gauge.setEarnedRewards(address(adapter), address(xkdk), 100e18);
-        gauge.setEarnedRewards(address(adapter), address(bgt), 50e18);
+        uint256[] memory rewardAmounts = new uint256[](2);
+        rewardAmounts[0] = 100e18;
+        rewardAmounts[1] = 50e18;
+        farm.setEarnedRewards(address(adapter), rewardAmounts);
         
-        (address[] memory rewardTokens, uint256[] memory rewardAmounts) = adapter.getPendingRewards(lpToken);
+        (address[] memory rewardTokens, uint256[] memory amounts) = adapter.getPendingRewards(lpToken);
         
         assertEq(rewardTokens.length, 2);
-        assertEq(rewardAmounts[0], 100e18);
-        assertEq(rewardAmounts[1], 50e18);
+        assertEq(amounts[0], 100e18);
+        assertEq(amounts[1], 50e18);
+    }
+    
+    function testGetStakeIdsReturnsAll() public {
+        // Setup: Create multiple stakes
+        uint256 amountA = 3000e18;
+        uint256 amountB = 3000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        
+        // Create 3 stakes
+        bytes32 kekId1 = adapter.stakeLP(lpToken, liquidity / 3);
+        bytes32 kekId2 = adapter.stakeLP(lpToken, liquidity / 3);
+        bytes32 kekId3 = adapter.stakeLP(lpToken, liquidity / 3);
+        vm.stopPrank();
+        
+        bytes32[] memory stakeIds = adapter.getStakeIds(lpToken);
+        assertEq(stakeIds.length, 3);
+        assertEq(stakeIds[0], kekId1);
+        assertEq(stakeIds[1], kekId2);
+        assertEq(stakeIds[2], kekId3);
+    }
+    
+    function testGetStakeInfoValidKekId() public {
+        // Setup: Create a stake
+        uint256 amountA = 1000e18;
+        uint256 amountB = 1000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        bytes32 kekId = adapter.stakeLP(lpToken, liquidity);
+        vm.stopPrank();
+        
+        // Get stake info
+        IKodiakFarm.LockedStake memory stake = adapter.getStakeInfo(lpToken, kekId);
+        
+        assertEq(stake.kek_id, kekId);
+        assertEq(stake.liquidity, liquidity);
+        assertEq(stake.start_timestamp, block.timestamp);
+        assertEq(stake.ending_timestamp, block.timestamp + TEST_LOCK_DURATION);
+        assertGe(stake.lock_multiplier, 1e18); // At least 1x
+    }
+    
+    function testGetStakeInfoInvalidKekIdReverts() public {
+        bytes32 fakeKekId = keccak256("fake");
+        
+        vm.expectRevert(ApiaryKodiakAdapter.APIARY__NOT_OUR_STAKE.selector);
+        adapter.getStakeInfo(lpToken, fakeKekId);
+    }
+    
+    function testTotalStakedLPAfterMultipleStakes() public {
+        // Setup: Create multiple stakes
+        uint256 amountA = 3000e18;
+        uint256 amountB = 3000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        
+        // Stake in portions
+        adapter.stakeLP(lpToken, 400e18);
+        assertEq(adapter.totalStakedLP(lpToken), 400e18);
+        
+        adapter.stakeLP(lpToken, 300e18);
+        assertEq(adapter.totalStakedLP(lpToken), 700e18);
+        
+        adapter.stakeLP(lpToken, 300e18);
+        assertEq(adapter.totalStakedLP(lpToken), 1000e18);
+        vm.stopPrank();
     }
     
     function testGetAdapterInfo() public {
@@ -1069,24 +1702,308 @@ contract ApiaryKodiakAdapterTest is Test {
             yieldManager
         );
         
-        // 3. Stake LP
-        address lpToken = factory.getPair(address(apiary), address(honey));
+        // 3. Stake LP (with lock)
         IERC20(lpToken).approve(address(adapter), liquidity);
-        adapter.stakeLP(lpToken, liquidity);
+        bytes32 kekId = adapter.stakeLP(lpToken, liquidity);
         
         // 4. Set and claim rewards
-        gauge.setEarnedRewards(address(adapter), address(xkdk), 50e18);
+        uint256[] memory rewardAmounts = new uint256[](2);
+        rewardAmounts[0] = 50e18;
+        rewardAmounts[1] = 0;
+        farm.setEarnedRewards(address(adapter), rewardAmounts);
         adapter.claimLPRewardsTo(lpToken, treasury);
-        
-        // 5. Unstake LP
-        adapter.unstakeLPTo(lpToken, liquidity / 2, treasury);
-        
         vm.stopPrank();
+        
+        // 5. Warp past lock and unstake
+        vm.warp(block.timestamp + TEST_LOCK_DURATION + 1);
+        
+        vm.prank(yieldManager);
+        adapter.unstakeLPTo(lpToken, kekId, treasury);
         
         // Verify final state
         assertEq(adapter.totalSwapsExecuted(), 1);
         assertEq(adapter.totalLiquidityOps(), 1);
         assertEq(adapter.totalRewardsClaimed(), 1);
         assertGt(xkdk.balanceOf(treasury), 0);
+        assertGt(IERC20(lpToken).balanceOf(treasury), 0);
+    }
+    
+    /*//////////////////////////////////////////////////////////////
+                        10. GAS & EDGE CASE TESTS
+    //////////////////////////////////////////////////////////////*/
+    
+    function testManyStakesGasLimit() public {
+        // Test with 20 stakes to check gas consumption
+        uint256 numStakes = 20;
+        uint256 amountA = 50000e18;
+        uint256 amountB = 50000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        
+        // Create many stakes
+        uint256 stakeAmount = liquidity / numStakes;
+        bytes32[] memory kekIds = new bytes32[](numStakes);
+        
+        uint256 gasStart = gasleft();
+        for (uint256 i = 0; i < numStakes; i++) {
+            kekIds[i] = adapter.stakeLP(lpToken, stakeAmount);
+        }
+        uint256 gasUsedStaking = gasStart - gasleft();
+        
+        assertEq(adapter.getStakeIds(lpToken).length, numStakes);
+        
+        // Warp past lock expiration
+        vm.warp(block.timestamp + TEST_LOCK_DURATION + 1);
+        
+        // Measure gas for unstakeAllExpired
+        gasStart = gasleft();
+        uint256 unstaked = adapter.unstakeAllExpired(lpToken);
+        uint256 gasUsedUnstaking = gasStart - gasleft();
+        
+        vm.stopPrank();
+        
+        assertGt(unstaked, 0);
+        assertEq(adapter.getStakeIds(lpToken).length, 0);
+        
+        // Log gas usage for benchmarking
+        // emit log_named_uint("Gas used for 20 stakes", gasUsedStaking);
+        // emit log_named_uint("Gas used for unstakeAllExpired (20)", gasUsedUnstaking);
+    }
+    
+    function testStakeWithMinimumLockDuration() public {
+        // Set lock duration to farm minimum (7 days)
+        vm.prank(owner);
+        adapter.setLockDuration(lpToken, 7 days);
+        
+        uint256 amountA = 1000e18;
+        uint256 amountB = 1000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        
+        bytes32 kekId = adapter.stakeLP(lpToken, liquidity);
+        vm.stopPrank();
+        
+        // Verify stake with minimum lock
+        IKodiakFarm.LockedStake memory stake = adapter.getStakeInfo(lpToken, kekId);
+        assertEq(stake.ending_timestamp - stake.start_timestamp, 7 days);
+        assertEq(stake.lock_multiplier, 1e18); // 1x multiplier for minimum lock
+    }
+    
+    function testStakeWithMaxLockDuration() public {
+        // Set lock duration to farm maximum (365 days)
+        vm.prank(owner);
+        adapter.setLockDuration(lpToken, 365 days);
+        
+        uint256 amountA = 1000e18;
+        uint256 amountB = 1000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        
+        bytes32 kekId = adapter.stakeLP(lpToken, liquidity);
+        vm.stopPrank();
+        
+        // Verify stake with maximum lock
+        IKodiakFarm.LockedStake memory stake = adapter.getStakeInfo(lpToken, kekId);
+        assertEq(stake.ending_timestamp - stake.start_timestamp, 365 days);
+        assertEq(stake.lock_multiplier, 3e18); // 3x multiplier for max lock
+    }
+    
+    function testStakeWithZeroLockWhenFarmAllows() public {
+        // When farm allows 0 lock time, adapter should allow it too
+        farm.setMinLockTime(0);
+        
+        // Setting 0 lock duration should work when farm allows it
+        vm.prank(owner);
+        adapter.setLockDuration(lpToken, 0);
+        
+        // But staking should still fail because lockDuration == 0 check in stakeLP
+        uint256 amountA = 1000e18;
+        uint256 amountB = 1000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        
+        // Staking with 0 lock duration reverts due to safety check in stakeLP
+        vm.expectRevert(ApiaryKodiakAdapter.APIARY__LOCK_DURATION_NOT_SET.selector);
+        adapter.stakeLP(lpToken, liquidity);
+        vm.stopPrank();
+    }
+    
+    function testStakeWithFarmMinimumZeroButAdapterRequiresNonZero() public {
+        // Set farm min lock to 0, but adapter still needs a valid duration
+        farm.setMinLockTime(0);
+        
+        // Setting a valid (non-zero) duration should work
+        vm.prank(owner);
+        adapter.setLockDuration(lpToken, 1 days);
+        
+        assertEq(adapter.getLockDuration(lpToken), 1 days);
+    }
+    
+    function testGetCombinedWeight() public {
+        // Setup and stake
+        uint256 amountA = 1000e18;
+        uint256 amountB = 1000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        adapter.stakeLP(lpToken, liquidity);
+        vm.stopPrank();
+        
+        uint256 weight = adapter.getCombinedWeight(lpToken);
+        
+        // Weight should be liquidity * multiplier / 1e18
+        // For 7 day lock, multiplier is 1e18 (1x)
+        assertEq(weight, liquidity);
+    }
+    
+    function testUnstakeLPRevertsNonYieldManager() public {
+        // Setup a stake first
+        uint256 amountA = 1000e18;
+        uint256 amountB = 1000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        bytes32 kekId = adapter.stakeLP(lpToken, liquidity);
+        vm.stopPrank();
+        
+        // Warp past lock
+        vm.warp(block.timestamp + TEST_LOCK_DURATION + 1);
+        
+        // Try to unstake as non-yield-manager
+        vm.prank(user);
+        vm.expectRevert(ApiaryKodiakAdapter.APIARY__ONLY_YIELD_MANAGER.selector);
+        adapter.unstakeLP(lpToken, kekId);
+    }
+    
+    function testClaimLPRewardsRevertsNonYieldManager() public {
+        vm.prank(user);
+        vm.expectRevert(ApiaryKodiakAdapter.APIARY__ONLY_YIELD_MANAGER.selector);
+        adapter.claimLPRewards(lpToken);
+    }
+    
+    function testPartialExpiredStakes() public {
+        // Create stakes with different expiration times
+        uint256 amountA = 2000e18;
+        uint256 amountB = 2000e18;
+        
+        vm.startPrank(yieldManager);
+        apiary.approve(address(adapter), amountA);
+        honey.approve(address(adapter), amountB);
+        
+        (, , uint256 liquidity) = adapter.addLiquidity(
+            address(apiary),
+            address(honey),
+            amountA,
+            amountB,
+            100e18,
+            yieldManager
+        );
+        
+        IERC20(lpToken).approve(address(adapter), liquidity);
+        
+        // First stake with 7 day lock
+        bytes32 kekId1 = adapter.stakeLP(lpToken, liquidity / 2);
+        vm.stopPrank();
+        
+        // Change lock duration for second stake
+        vm.prank(owner);
+        adapter.setLockDuration(lpToken, 30 days);
+        
+        vm.prank(yieldManager);
+        bytes32 kekId2 = adapter.stakeLP(lpToken, liquidity / 2);
+        
+        // Warp 10 days - first stake should be expired, second still locked
+        vm.warp(block.timestamp + 10 days);
+        
+        // Check expired stakes
+        (bytes32[] memory expired, uint256 expiredLiquidity) = adapter.getExpiredStakes(lpToken);
+        assertEq(expired.length, 1);
+        assertEq(expired[0], kekId1);
+        assertEq(expiredLiquidity, liquidity / 2);
+        
+        // Unstake expired
+        vm.prank(yieldManager);
+        uint256 unstaked = adapter.unstakeAllExpired(lpToken);
+        
+        assertEq(unstaked, liquidity / 2);
+        assertEq(adapter.getStakeIds(lpToken).length, 1); // Only second stake remains
+        assertTrue(adapter.isOurStake(kekId2));
+        assertFalse(adapter.isOurStake(kekId1));
     }
 }

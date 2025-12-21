@@ -132,6 +132,18 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Total LP created (historical tracking)
     uint256 public totalLPCreated;
 
+    /// @notice Total Kodiak rewards claimed (historical tracking)
+    uint256 public totalKodiakRewards;
+
+    /// @notice Tracked kek_ids from Kodiak locked staking (per LP token)
+    mapping(address lpToken => bytes32[] kekIds) public lpStakeIds;
+
+    /// @notice Track if a kek_id belongs to this contract
+    mapping(bytes32 kekId => bool) public isOurKekId;
+
+    /// @notice Map kek_id back to its LP token
+    mapping(bytes32 kekId => address lpToken) public kekIdToLP;
+
     /// @notice Last execution timestamp
     uint256 public lastExecutionTime;
 
@@ -189,6 +201,26 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
 
     event ApprovalsSetup(address indexed adapter, address[] tokens);
 
+    event LPStakedOnKodiak(
+        address indexed lpToken,
+        bytes32 indexed kekId,
+        uint256 amount,
+        uint256 lockDuration
+    );
+
+    event KodiakRewardsClaimed(
+        address indexed lpToken,
+        address[] rewardTokens,
+        uint256[] rewardAmounts,
+        uint256 totalValueSwapped
+    );
+
+    event ExpiredStakesUnstaked(
+        address indexed lpToken,
+        uint256 stakesWithdrawn,
+        uint256 totalAmount
+    );
+
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -203,6 +235,7 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__BURN_FAILED();
     error APIARY__LP_FAILED();
     error APIARY__STAKE_FAILED();
+    error APIARY__NO_EXPIRED_STAKES();
     error APIARY__SLIPPAGE_TOO_HIGH();
     error APIARY__NO_PENDING_YIELD();
     error APIARY__EMERGENCY_MODE_ACTIVE();
@@ -670,9 +703,10 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Stake LP tokens on Kodiak gauge
+     * @notice Stake LP tokens on Kodiak farm with locked staking
      * @param lpAmount Amount of LP tokens to stake
-     * @dev Uses typed interface - reverts on failure (atomic)
+     * @dev Uses typed interface - captures and tracks kek_id for later withdrawal
+     *      Reverts on failure (atomic)
      */
     function _stakeLPTokens(uint256 lpAmount) internal {
         if (kodiakAdapter == address(0) || lpAmount == 0) return;
@@ -690,8 +724,18 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         // Approve LP tokens
         IERC20(lpToken).forceApprove(kodiakAdapter, lpAmount);
 
-        // Stake LP tokens via adapter
-        IApiaryKodiakAdapter(kodiakAdapter).stakeLP(lpToken, lpAmount);
+        // Stake LP tokens via adapter - now returns kek_id
+        bytes32 kekId = IApiaryKodiakAdapter(kodiakAdapter).stakeLP(lpToken, lpAmount);
+
+        // Track the kek_id for later withdrawal
+        lpStakeIds[lpToken].push(kekId);
+        isOurKekId[kekId] = true;
+        kekIdToLP[kekId] = lpToken;
+
+        // Get lock duration for event
+        uint256 lockDuration = IApiaryKodiakAdapter(kodiakAdapter).getLockDuration(lpToken);
+
+        emit LPStakedOnKodiak(lpToken, kekId, lpAmount, lockDuration);
     }
 
     /**
@@ -707,6 +751,199 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         // Transfer to staking contract for distribution
         if (apiaryAmount > 0) {
             apiaryToken.safeTransfer(stakingContract, apiaryAmount);
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        KODIAK LP MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Claim rewards from Kodiak farm for staked LP tokens
+     * @param lpToken LP token address to claim rewards for
+     * @return rewardTokens Array of reward token addresses
+     * @return rewardAmounts Array of reward amounts claimed
+     * @dev Claims xKDK, BGT, and any other reward tokens from the farm
+     *      Rewards are sent to this contract for further processing
+     */
+    function claimKodiakRewards(address lpToken)
+        external
+        whenNotPaused
+        nonReentrant
+        returns (address[] memory rewardTokens, uint256[] memory rewardAmounts)
+    {
+        if (kodiakAdapter == address(0)) {
+            revert APIARY__ADAPTER_NOT_SET();
+        }
+
+        // Claim rewards from adapter
+        (rewardTokens, rewardAmounts) = IApiaryKodiakAdapter(kodiakAdapter).claimLPRewards(lpToken);
+
+        uint256 totalValueSwapped;
+
+        // Process each reward token
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            if (rewardAmounts[i] > 0) {
+                totalKodiakRewards += rewardAmounts[i];
+                totalValueSwapped += rewardAmounts[i];
+            }
+        }
+
+        emit KodiakRewardsClaimed(lpToken, rewardTokens, rewardAmounts, totalValueSwapped);
+    }
+
+    /**
+     * @notice Claim rewards and swap to iBGT for yield processing
+     * @param lpToken LP token address
+     * @return ibgtReceived Total iBGT received after swaps
+     * @dev Swaps all reward tokens to iBGT and adds to yield pool
+     */
+    function claimAndSwapKodiakRewards(address lpToken)
+        external
+        whenNotPaused
+        nonReentrant
+        returns (uint256 ibgtReceived)
+    {
+        if (kodiakAdapter == address(0)) {
+            revert APIARY__ADAPTER_NOT_SET();
+        }
+
+        // Claim rewards from adapter
+        (address[] memory rewardTokens, uint256[] memory rewardAmounts) = 
+            IApiaryKodiakAdapter(kodiakAdapter).claimLPRewards(lpToken);
+
+        // Swap each reward token to iBGT
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            if (rewardAmounts[i] > 0) {
+                address rewardToken_ = rewardTokens[i];
+                uint256 amount = rewardAmounts[i];
+
+                // If already iBGT, no swap needed
+                if (rewardToken_ == address(ibgtToken)) {
+                    ibgtReceived += amount;
+                    continue;
+                }
+
+                // Try to swap to iBGT
+                IERC20(rewardToken_).forceApprove(kodiakAdapter, amount);
+
+                try IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
+                    rewardToken_,
+                    address(ibgtToken),
+                    amount
+                ) returns (uint256 expectedOut) {
+                    uint256 minOut = _calculateMinOutput(expectedOut);
+                    
+                    uint256 swapped = IApiaryKodiakAdapter(kodiakAdapter).swap(
+                        rewardToken_,
+                        address(ibgtToken),
+                        amount,
+                        minOut,
+                        address(this)
+                    );
+                    ibgtReceived += swapped;
+                } catch {
+                    // If direct swap fails, try through HONEY
+                    try IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
+                        rewardToken_,
+                        address(honeyToken),
+                        amount
+                    ) returns (uint256 honeyExpected) {
+                        uint256 minHoney = _calculateMinOutput(honeyExpected);
+                        
+                        uint256 honeyReceived = IApiaryKodiakAdapter(kodiakAdapter).swap(
+                            rewardToken_,
+                            address(honeyToken),
+                            amount,
+                            minHoney,
+                            address(this)
+                        );
+
+                        // Swap HONEY to iBGT
+                        honeyToken.forceApprove(kodiakAdapter, honeyReceived);
+                        uint256 ibgtExpected = IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
+                            address(honeyToken),
+                            address(ibgtToken),
+                            honeyReceived
+                        );
+                        uint256 minIbgt = _calculateMinOutput(ibgtExpected);
+                        
+                        ibgtReceived += IApiaryKodiakAdapter(kodiakAdapter).swap(
+                            address(honeyToken),
+                            address(ibgtToken),
+                            honeyReceived,
+                            minIbgt,
+                            address(this)
+                        );
+                    } catch {
+                        // Cannot swap - send to treasury
+                        IERC20(rewardToken_).safeTransfer(treasury, amount);
+                    }
+                }
+
+                totalKodiakRewards += amount;
+            }
+        }
+
+        emit KodiakRewardsClaimed(lpToken, rewardTokens, rewardAmounts, ibgtReceived);
+    }
+
+    /**
+     * @notice Unstake all expired LP positions and return LP tokens
+     * @param lpToken LP token address
+     * @return totalAmount Total LP tokens unstaked
+     * @dev Only unstakes positions whose lock period has expired
+     */
+    function unstakeExpiredLP(address lpToken)
+        external
+        whenNotPaused
+        nonReentrant
+        returns (uint256 totalAmount)
+    {
+        if (kodiakAdapter == address(0)) {
+            revert APIARY__ADAPTER_NOT_SET();
+        }
+
+        // Get expired stakes
+        (bytes32[] memory expiredKekIds, uint256 expiredLiquidity) = 
+            IApiaryKodiakAdapter(kodiakAdapter).getExpiredStakes(lpToken);
+
+        if (expiredKekIds.length == 0 || expiredLiquidity == 0) {
+            revert APIARY__NO_EXPIRED_STAKES();
+        }
+
+        // Unstake all expired positions
+        totalAmount = IApiaryKodiakAdapter(kodiakAdapter).unstakeAllExpired(lpToken);
+
+        // Clean up tracking
+        for (uint256 i = 0; i < expiredKekIds.length; i++) {
+            bytes32 kekId = expiredKekIds[i];
+            if (isOurKekId[kekId]) {
+                isOurKekId[kekId] = false;
+                delete kekIdToLP[kekId];
+                _removeStakeId(lpToken, kekId);
+            }
+        }
+
+        emit ExpiredStakesUnstaked(lpToken, expiredKekIds.length, totalAmount);
+    }
+
+    /**
+     * @notice Remove a stake ID from the tracking array
+     * @param lpToken LP token address
+     * @param kekId Stake ID to remove
+     */
+    function _removeStakeId(address lpToken, bytes32 kekId) internal {
+        bytes32[] storage stakeIds = lpStakeIds[lpToken];
+        uint256 length = stakeIds.length;
+
+        for (uint256 i = 0; i < length; i++) {
+            if (stakeIds[i] == kekId) {
+                // Move last element to this position and pop
+                stakeIds[i] = stakeIds[length - 1];
+                stakeIds.pop();
+                break;
+            }
         }
     }
 
@@ -836,6 +1073,90 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         _totalLPCreated = totalLPCreated;
         _lastExecutionTime = lastExecutionTime;
         _lastExecutionBlock = lastExecutionBlock;
+    }
+
+    /**
+     * @notice Get all stake IDs tracked by this contract for an LP token
+     * @param lpToken LP token address
+     * @return kekIds Array of stake IDs
+     */
+    function getKodiakStakeIds(address lpToken) external view returns (bytes32[] memory kekIds) {
+        return lpStakeIds[lpToken];
+    }
+
+    /**
+     * @notice Get total staked LP amount on Kodiak for an LP token
+     * @param lpToken LP token address
+     * @return stakedAmount Total LP tokens staked
+     */
+    function getKodiakStakedBalance(address lpToken) external view returns (uint256 stakedAmount) {
+        if (kodiakAdapter == address(0)) return 0;
+        return IApiaryKodiakAdapter(kodiakAdapter).getStakedBalance(lpToken);
+    }
+
+    /**
+     * @notice Get pending Kodiak rewards for an LP token
+     * @param lpToken LP token address
+     * @return rewardTokens Array of reward token addresses
+     * @return rewardAmounts Array of pending reward amounts
+     */
+    function getPendingKodiakRewards(address lpToken) 
+        external 
+        view 
+        returns (address[] memory rewardTokens, uint256[] memory rewardAmounts) 
+    {
+        if (kodiakAdapter == address(0)) {
+            return (new address[](0), new uint256[](0));
+        }
+        return IApiaryKodiakAdapter(kodiakAdapter).getPendingRewards(lpToken);
+    }
+
+    /**
+     * @notice Get expired stakes ready for withdrawal
+     * @param lpToken LP token address
+     * @return expiredKekIds Array of expired stake IDs
+     * @return totalExpiredLiquidity Total LP tokens ready to unstake
+     */
+    function getExpiredKodiakStakes(address lpToken)
+        external
+        view
+        returns (bytes32[] memory expiredKekIds, uint256 totalExpiredLiquidity)
+    {
+        if (kodiakAdapter == address(0)) {
+            return (new bytes32[](0), 0);
+        }
+        return IApiaryKodiakAdapter(kodiakAdapter).getExpiredStakes(lpToken);
+    }
+
+    /**
+     * @notice Get the APIARY/HONEY LP token address
+     * @return lpToken LP token address
+     */
+    function getApiaryHoneyLPToken() external view returns (address lpToken) {
+        if (kodiakAdapter == address(0)) return address(0);
+        return IApiaryKodiakAdapter(kodiakAdapter).getLPToken(
+            address(apiaryToken),
+            address(honeyToken)
+        );
+    }
+
+    /**
+     * @notice Get Kodiak reward statistics
+     * @return _totalKodiakRewards Total Kodiak rewards claimed
+     * @return activeStakes Number of active stakes for APIARY/HONEY LP
+     */
+    function getKodiakStats() external view returns (uint256 _totalKodiakRewards, uint256 activeStakes) {
+        _totalKodiakRewards = totalKodiakRewards;
+        
+        if (kodiakAdapter != address(0)) {
+            address lpToken = IApiaryKodiakAdapter(kodiakAdapter).getLPToken(
+                address(apiaryToken),
+                address(honeyToken)
+            );
+            if (lpToken != address(0)) {
+                activeStakes = lpStakeIds[lpToken].length;
+            }
+        }
     }
 
     /*//////////////////////////////////////////////////////////////

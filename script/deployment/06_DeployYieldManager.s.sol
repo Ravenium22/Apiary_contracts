@@ -11,6 +11,21 @@ import "../../src/ApiaryKodiakAdapter.sol";
  * @notice Deployment script for Yield Manager and Adapters
  * @dev Step 6 of Apiary protocol deployment
  * 
+ * IMPORTANT: Kodiak Farm Configuration
+ * =====================================
+ * The Kodiak farm address is NOT deployed here because:
+ * 1. Each LP pair has its own farm contract created by KodiakFarmFactory
+ * 2. The APIARY/HONEY farm will be created via Kodiak UI AFTER:
+ *    - APIARY/HONEY pool is created
+ *    - Initial liquidity is added
+ *    - Farm is requested via Kodiak governance/UI
+ * 
+ * Post-Deployment Steps:
+ * 1. Create APIARY/HONEY pool on Kodiak
+ * 2. Add initial liquidity
+ * 3. Create farm via Kodiak UI (https://app.kodiak.finance/#/liquidity/farms)
+ * 4. Run 08_ConfigureKodiakFarm.s.sol with farm address
+ * 
  * Usage:
  *   forge script script/deployment/06_DeployYieldManager.s.sol:DeployYieldManager \
  *     --rpc-url $RPC_URL \
@@ -132,6 +147,7 @@ contract DeployYieldManager is Script {
         console.log("  Deadline Offset:", kodiakAdapter.defaultDeadlineOffset(), "seconds");
         console.log("  Min Swap:", kodiakAdapter.minSwapAmount() / 1e18, "tokens");
         console.log("  Min Liquidity:", kodiakAdapter.minLiquidityAmount() / 1e18, "LP");
+        console.log("  APIARY/HONEY Farm: NOT YET CONFIGURED (Phase B)");
         
         // Sanity checks
         require(address(yieldManager.apiaryToken()) == apiary, "YM: APIARY not set");

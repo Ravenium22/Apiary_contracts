@@ -8,7 +8,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IKodiakRouter } from "./interfaces/IKodiakRouter.sol";
 import { IKodiakFactory } from "./interfaces/IKodiakFactory.sol";
-import { IKodiakGauge } from "./interfaces/IKodiakGauge.sol";
+import { IKodiakFarm } from "./interfaces/IKodiakFarm.sol";
 import { IKodiakPair } from "./interfaces/IKodiakPair.sol";
 
 /**
@@ -72,11 +72,20 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Minimum liquidity amount to prevent dust
     uint256 public minLiquidityAmount;
 
-    /// @notice Mapping of LP token → gauge address
-    mapping(address => address) public lpToGauge;
+    /// @notice Mapping of LP token → farm address (replaces gauge)
+    mapping(address => address) public lpToFarm;
 
-    /// @notice Mapping of LP token → total staked by adapter
-    mapping(address => uint256) public totalStakedLP;
+    /// @notice Mapping of LP token → configured lock duration in seconds
+    mapping(address => uint256) public lpLockDuration;
+
+    /// @notice Mapping of LP token → array of active stake kek_ids
+    mapping(address => bytes32[]) public lpStakeIds;
+
+    /// @notice Mapping of kek_id → bool to verify stake ownership
+    mapping(bytes32 => bool) public isOurStake;
+
+    /// @notice Mapping of kek_id → LP token for reverse lookup
+    mapping(bytes32 => address) public stakeIdToLP;
 
     /// @notice Total swaps executed (for monitoring)
     uint256 public totalSwapsExecuted;
@@ -116,17 +125,42 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 amountB
     );
 
-    event LPStaked(address indexed lpToken, address indexed gauge, uint256 amount);
+    event LPStaked(
+        address indexed lpToken,
+        address indexed farm,
+        uint256 amount,
+        bytes32 indexed kekId,
+        uint256 lockDuration
+    );
 
-    event LPUnstaked(address indexed lpToken, address indexed gauge, uint256 amount);
+    event LPUnstaked(
+        address indexed lpToken,
+        address indexed farm,
+        uint256 amount,
+        bytes32 indexed kekId
+    );
 
-    event RewardsClaimed(address indexed lpToken, address indexed gauge, uint256 rewardCount);
+    event AllExpiredLPUnstaked(
+        address indexed lpToken,
+        address indexed farm,
+        uint256 totalAmount,
+        uint256 stakesWithdrawn
+    );
+
+    event RewardsClaimed(
+        address indexed lpToken,
+        address indexed farm,
+        address[] rewardTokens,
+        uint256[] rewardAmounts
+    );
+
+    event FarmRegistered(address indexed lpToken, address indexed farm);
+
+    event LockDurationUpdated(address indexed lpToken, uint256 oldDuration, uint256 newDuration);
 
     event YieldManagerUpdated(address indexed oldManager, address indexed newManager);
 
     event TreasuryUpdated(address indexed oldTreasury, address indexed newTreasury);
-
-    event GaugeRegistered(address indexed lpToken, address indexed gauge);
 
     event SlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
 
@@ -142,14 +176,17 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__INVALID_AMOUNT();
     error APIARY__ONLY_YIELD_MANAGER();
     error APIARY__POOL_DOES_NOT_EXIST();
-    error APIARY__GAUGE_NOT_REGISTERED();
+    error APIARY__FARM_NOT_REGISTERED();
     error APIARY__SLIPPAGE_TOO_HIGH();
     error APIARY__BELOW_MINIMUM();
     error APIARY__SWAP_FAILED();
     error APIARY__LIQUIDITY_FAILED();
-    error APIARY__INSUFFICIENT_LP_STAKED();
+    error APIARY__NOT_OUR_STAKE();
     error APIARY__INVALID_PATH();
     error APIARY__DEADLINE_EXPIRED();
+    error APIARY__LOCK_DURATION_TOO_SHORT();
+    error APIARY__LOCK_DURATION_NOT_SET();
+    error APIARY__STAKE_NOT_EXPIRED();
 
     /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
@@ -525,12 +562,24 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Stake LP tokens in Kodiak gauge
+     * @notice Stake LP tokens in Kodiak Farm with locked staking
+     * @dev Each stake creates a unique kek_id that must be tracked for withdrawal
      * @param lpToken LP token address
      * @param amount Amount of LP tokens to stake
-     * @dev Gauge must be registered first via registerGauge()
+     * @return kekId The unique identifier for this stake position
+     * 
+     * Lock Duration:
+     * - Must be set via setLockDuration() before staking
+     * - Longer duration = higher reward multiplier
+     * - Cannot withdraw until lock expires (unless farm has stakesUnlocked)
      */
-    function stakeLP(address lpToken, uint256 amount) external onlyYieldManager whenNotPaused nonReentrant {
+    function stakeLP(address lpToken, uint256 amount) 
+        external 
+        onlyYieldManager 
+        whenNotPaused 
+        nonReentrant 
+        returns (bytes32 kekId) 
+    {
         if (amount == 0) {
             revert APIARY__INVALID_AMOUNT();
         }
@@ -539,93 +588,191 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
             revert APIARY__BELOW_MINIMUM();
         }
 
-        address gauge = lpToGauge[lpToken];
-        if (gauge == address(0)) {
-            revert APIARY__GAUGE_NOT_REGISTERED();
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
+            revert APIARY__FARM_NOT_REGISTERED();
+        }
+
+        uint256 lockDuration = lpLockDuration[lpToken];
+        if (lockDuration == 0) {
+            revert APIARY__LOCK_DURATION_NOT_SET();
         }
 
         // Transfer LP tokens from sender
         IERC20(lpToken).safeTransferFrom(msg.sender, address(this), amount);
 
-        // Approve gauge
-        _approveTokenIfNeeded(lpToken, gauge, amount);
+        // Approve farm
+        _approveTokenIfNeeded(lpToken, farm, amount);
 
-        // Stake in gauge
-        IKodiakGauge(gauge).stake(amount);
+        // Get stake count before to identify new stake
+        IKodiakFarm farmContract = IKodiakFarm(farm);
+        uint256 stakeCountBefore = farmContract.lockedStakesOf(address(this)).length;
 
-        // Update tracking
-        totalStakedLP[lpToken] += amount;
+        // Stake with configured lock duration
+        farmContract.stakeLocked(amount, lockDuration);
 
-        emit LPStaked(lpToken, gauge, amount);
+        // Get the new kek_id from the stakes array (last element)
+        IKodiakFarm.LockedStake[] memory stakes = farmContract.lockedStakesOf(address(this));
+        require(stakes.length > stakeCountBefore, "Stake not created");
+        kekId = stakes[stakes.length - 1].kek_id;
+
+        // Track the stake
+        lpStakeIds[lpToken].push(kekId);
+        isOurStake[kekId] = true;
+        stakeIdToLP[kekId] = lpToken;
+
+        emit LPStaked(lpToken, farm, amount, kekId, lockDuration);
     }
 
     /**
-     * @notice Unstake LP tokens from Kodiak gauge (sends to caller)
+     * @notice Unstake a specific locked stake by kek_id
+     * @dev Only works after lock period expires (unless farm has stakesUnlocked)
      * @param lpToken LP token address
-     * @param amount Amount of LP tokens to unstake
+     * @param kekId The unique identifier of the stake to withdraw
+     * @return amount Amount of LP tokens withdrawn
      */
-    function unstakeLP(address lpToken, uint256 amount)
+    function unstakeLP(address lpToken, bytes32 kekId)
         external
         onlyYieldManager
         whenNotPaused
         nonReentrant
+        returns (uint256 amount)
     {
-        _unstakeLP(lpToken, amount, msg.sender);
+        return _unstakeLP(lpToken, kekId, msg.sender);
     }
 
     /**
-     * @notice Unstake LP tokens from Kodiak gauge to specific recipient
+     * @notice Unstake a specific locked stake to a recipient
      * @param lpToken LP token address
-     * @param amount Amount of LP tokens to unstake
+     * @param kekId The unique identifier of the stake to withdraw
      * @param recipient Address to receive unstaked LP tokens
+     * @return amount Amount of LP tokens withdrawn
      */
-    function unstakeLPTo(address lpToken, uint256 amount, address recipient)
+    function unstakeLPTo(address lpToken, bytes32 kekId, address recipient)
         external
         onlyYieldManager
         whenNotPaused
         nonReentrant
+        returns (uint256 amount)
     {
-        _unstakeLP(lpToken, amount, recipient);
+        return _unstakeLP(lpToken, kekId, recipient);
     }
 
     /**
-     * @notice Internal unstake implementation
+     * @notice Internal unstake implementation for a single stake
      */
-    function _unstakeLP(address lpToken, uint256 amount, address recipient) internal {
-        if (amount == 0) {
-            revert APIARY__INVALID_AMOUNT();
-        }
-
+    function _unstakeLP(address lpToken, bytes32 kekId, address recipient) 
+        internal 
+        returns (uint256 amount) 
+    {
         if (recipient == address(0)) {
             revert APIARY__ZERO_ADDRESS();
         }
 
-        address gauge = lpToGauge[lpToken];
-        if (gauge == address(0)) {
-            revert APIARY__GAUGE_NOT_REGISTERED();
+        if (!isOurStake[kekId]) {
+            revert APIARY__NOT_OUR_STAKE();
         }
 
-        if (amount > totalStakedLP[lpToken]) {
-            revert APIARY__INSUFFICIENT_LP_STAKED();
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
+            revert APIARY__FARM_NOT_REGISTERED();
         }
 
-        // Withdraw from gauge
-        IKodiakGauge(gauge).withdraw(amount);
+        // Get LP balance before withdrawal
+        uint256 balanceBefore = IERC20(lpToken).balanceOf(address(this));
 
-        // Update tracking
-        totalStakedLP[lpToken] -= amount;
+        // Withdraw the specific stake
+        IKodiakFarm(farm).withdrawLocked(kekId);
+
+        // Calculate amount received
+        amount = IERC20(lpToken).balanceOf(address(this)) - balanceBefore;
+
+        // Clean up tracking
+        _removeStakeId(lpToken, kekId);
+        isOurStake[kekId] = false;
+        delete stakeIdToLP[kekId];
 
         // Transfer LP tokens to recipient
-        IERC20(lpToken).safeTransfer(recipient, amount);
+        if (amount > 0) {
+            IERC20(lpToken).safeTransfer(recipient, amount);
+        }
 
-        emit LPUnstaked(lpToken, gauge, amount);
+        emit LPUnstaked(lpToken, farm, amount, kekId);
     }
 
     /**
-     * @notice Claim rewards from staked LP tokens (sends to caller)
+     * @notice Withdraw all expired stakes for an LP token
+     * @dev Only withdraws stakes where ending_timestamp has passed
+     * @param lpToken LP token address
+     * @return totalAmount Total LP tokens withdrawn
+     */
+    function unstakeAllExpired(address lpToken)
+        external
+        onlyYieldManager
+        whenNotPaused
+        nonReentrant
+        returns (uint256 totalAmount)
+    {
+        return _unstakeAllExpired(lpToken, msg.sender);
+    }
+
+    /**
+     * @notice Withdraw all expired stakes for an LP token to a recipient
+     * @param lpToken LP token address
+     * @param recipient Address to receive unstaked LP tokens
+     * @return totalAmount Total LP tokens withdrawn
+     */
+    function unstakeAllExpiredTo(address lpToken, address recipient)
+        external
+        onlyYieldManager
+        whenNotPaused
+        nonReentrant
+        returns (uint256 totalAmount)
+    {
+        return _unstakeAllExpired(lpToken, recipient);
+    }
+
+    /**
+     * @notice Internal implementation for withdrawing all expired stakes
+     */
+    function _unstakeAllExpired(address lpToken, address recipient) 
+        internal 
+        returns (uint256 totalAmount) 
+    {
+        if (recipient == address(0)) {
+            revert APIARY__ZERO_ADDRESS();
+        }
+
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
+            revert APIARY__FARM_NOT_REGISTERED();
+        }
+
+        // Get LP balance before withdrawal
+        uint256 balanceBefore = IERC20(lpToken).balanceOf(address(this));
+
+        // Withdraw all expired stakes at once
+        IKodiakFarm(farm).withdrawLockedAll();
+
+        // Calculate total amount received
+        totalAmount = IERC20(lpToken).balanceOf(address(this)) - balanceBefore;
+
+        // Sync our tracking with actual farm state
+        uint256 stakesWithdrawn = _syncStakeIds(lpToken);
+
+        // Transfer LP tokens to recipient
+        if (totalAmount > 0) {
+            IERC20(lpToken).safeTransfer(recipient, totalAmount);
+        }
+
+        emit AllExpiredLPUnstaked(lpToken, farm, totalAmount, stakesWithdrawn);
+    }
+
+    /**
+     * @notice Claim rewards from staked LP tokens
      * @param lpToken LP token address
      * @return rewardTokens Array of reward token addresses
-     * @return rewardAmounts Array of reward amounts
+     * @return rewardAmounts Array of reward amounts claimed
      */
     function claimLPRewards(address lpToken)
         external
@@ -642,7 +789,7 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
      * @param lpToken LP token address
      * @param recipient Address to receive rewards
      * @return rewardTokens Array of reward token addresses
-     * @return rewardAmounts Array of reward amounts
+     * @return rewardAmounts Array of reward amounts claimed
      */
     function claimLPRewardsTo(address lpToken, address recipient)
         external
@@ -665,31 +812,28 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
             revert APIARY__ZERO_ADDRESS();
         }
 
-        address gauge = lpToGauge[lpToken];
-        if (gauge == address(0)) {
-            revert APIARY__GAUGE_NOT_REGISTERED();
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
+            revert APIARY__FARM_NOT_REGISTERED();
         }
 
-        IKodiakGauge gaugeContract = IKodiakGauge(gauge);
+        IKodiakFarm farmContract = IKodiakFarm(farm);
 
-        // Get reward tokens count
-        uint256 rewardCount = gaugeContract.rewardTokensLength();
+        // Get all reward tokens
+        rewardTokens = farmContract.getAllRewardTokens();
+        uint256 rewardCount = rewardTokens.length;
 
         // Get balances before claim
-        rewardTokens = new address[](rewardCount);
-        rewardAmounts = new uint256[](rewardCount);
-
         uint256[] memory balancesBefore = new uint256[](rewardCount);
-
         for (uint256 i = 0; i < rewardCount; i++) {
-            rewardTokens[i] = gaugeContract.rewardTokens(i);
             balancesBefore[i] = IERC20(rewardTokens[i]).balanceOf(address(this));
         }
 
-        // Claim rewards
-        gaugeContract.getReward();
+        // Claim all rewards
+        farmContract.getReward();
 
         // Calculate received amounts and transfer to recipient
+        rewardAmounts = new uint256[](rewardCount);
         for (uint256 i = 0; i < rewardCount; i++) {
             uint256 balanceAfter = IERC20(rewardTokens[i]).balanceOf(address(this));
             rewardAmounts[i] = balanceAfter - balancesBefore[i];
@@ -701,7 +845,7 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
 
         totalRewardsClaimed++;
 
-        emit RewardsClaimed(lpToken, gauge, rewardCount);
+        emit RewardsClaimed(lpToken, farm, rewardTokens, rewardAmounts);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -845,17 +989,102 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Get staked LP balance for a token
+     * @notice Get staked LP balance for a token (total locked liquidity)
      * @param lpToken LP token address
-     * @return balance Staked balance
+     * @return balance Total locked LP balance
      */
     function getStakedBalance(address lpToken) external view returns (uint256 balance) {
-        address gauge = lpToGauge[lpToken];
-        if (gauge == address(0)) {
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
             return 0;
         }
 
-        balance = IKodiakGauge(gauge).balanceOf(address(this));
+        balance = IKodiakFarm(farm).lockedLiquidityOf(address(this));
+    }
+
+    /**
+     * @notice Get all stake IDs for an LP token
+     * @param lpToken LP token address
+     * @return Array of kek_ids for all active stakes
+     */
+    function getStakeIds(address lpToken) external view returns (bytes32[] memory) {
+        return lpStakeIds[lpToken];
+    }
+
+    /**
+     * @notice Get detailed stake info by kek_id
+     * @param lpToken LP token address
+     * @param kekId The unique stake identifier
+     * @return stake The LockedStake struct with all details
+     */
+    function getStakeInfo(address lpToken, bytes32 kekId) 
+        external 
+        view 
+        returns (IKodiakFarm.LockedStake memory stake) 
+    {
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
+            revert APIARY__FARM_NOT_REGISTERED();
+        }
+
+        IKodiakFarm.LockedStake[] memory allStakes = IKodiakFarm(farm).lockedStakesOf(address(this));
+        for (uint256 i = 0; i < allStakes.length; i++) {
+            if (allStakes[i].kek_id == kekId) {
+                return allStakes[i];
+            }
+        }
+        revert APIARY__NOT_OUR_STAKE();
+    }
+
+    /**
+     * @notice Get all stakes that have expired and can be withdrawn
+     * @param lpToken LP token address
+     * @return expiredKekIds Array of kek_ids for expired stakes
+     * @return totalExpiredLiquidity Total LP that can be withdrawn
+     */
+    function getExpiredStakes(address lpToken) 
+        external 
+        view 
+        returns (bytes32[] memory expiredKekIds, uint256 totalExpiredLiquidity) 
+    {
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
+            return (new bytes32[](0), 0);
+        }
+
+        IKodiakFarm.LockedStake[] memory allStakes = IKodiakFarm(farm).lockedStakesOf(address(this));
+        
+        // First pass: count expired stakes
+        uint256 expiredCount = 0;
+        for (uint256 i = 0; i < allStakes.length; i++) {
+            if (block.timestamp >= allStakes[i].ending_timestamp) {
+                expiredCount++;
+            }
+        }
+
+        // Second pass: populate array
+        expiredKekIds = new bytes32[](expiredCount);
+        uint256 idx = 0;
+        for (uint256 i = 0; i < allStakes.length; i++) {
+            if (block.timestamp >= allStakes[i].ending_timestamp) {
+                expiredKekIds[idx] = allStakes[i].kek_id;
+                totalExpiredLiquidity += allStakes[i].liquidity;
+                idx++;
+            }
+        }
+    }
+
+    /**
+     * @notice Get total staked LP for a token (alias for totalStakedLP view)
+     * @param lpToken LP token address
+     * @return Total locked LP tokens
+     */
+    function totalStakedLP(address lpToken) external view returns (uint256) {
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
+            return 0;
+        }
+        return IKodiakFarm(farm).lockedLiquidityOf(address(this));
     }
 
     /**
@@ -869,21 +1098,92 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
         view
         returns (address[] memory rewardTokens, uint256[] memory rewardAmounts)
     {
-        address gauge = lpToGauge[lpToken];
-        if (gauge == address(0)) {
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
             return (new address[](0), new uint256[](0));
         }
 
-        IKodiakGauge gaugeContract = IKodiakGauge(gauge);
-        uint256 rewardCount = gaugeContract.rewardTokensLength();
+        IKodiakFarm farmContract = IKodiakFarm(farm);
+        rewardTokens = farmContract.getAllRewardTokens();
+        rewardAmounts = farmContract.earned(address(this));
+    }
 
-        rewardTokens = new address[](rewardCount);
-        rewardAmounts = new uint256[](rewardCount);
-
-        for (uint256 i = 0; i < rewardCount; i++) {
-            rewardTokens[i] = gaugeContract.rewardTokens(i);
-            rewardAmounts[i] = gaugeContract.earned(address(this), rewardTokens[i]);
+    /**
+     * @notice Get farm configuration info
+     * @param lpToken LP token address
+     * @return minLock Minimum lock time in seconds
+     * @return maxMultiplierLock Lock time for maximum multiplier
+     * @return maxMultiplier Maximum reward multiplier (1e18 = 1x)
+     * @return isPaused Whether staking is paused
+     * @return areStakesUnlocked Whether early withdrawal is allowed
+     */
+    function getFarmConfig(address lpToken)
+        external
+        view
+        returns (
+            uint256 minLock,
+            uint256 maxMultiplierLock,
+            uint256 maxMultiplier,
+            bool isPaused,
+            bool areStakesUnlocked
+        )
+    {
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
+            return (0, 0, 0, true, false);
         }
+
+        IKodiakFarm farmContract = IKodiakFarm(farm);
+        minLock = farmContract.lock_time_min();
+        maxMultiplierLock = farmContract.lock_time_for_max_multiplier();
+        maxMultiplier = farmContract.lock_max_multiplier();
+        isPaused = farmContract.stakingPaused();
+        areStakesUnlocked = farmContract.stakesUnlocked();
+    }
+
+    /**
+     * @notice Get lock multiplier for a specific duration
+     * @param lpToken LP token address
+     * @param secs Lock duration in seconds
+     * @return multiplier The reward multiplier (1e18 = 1x)
+     */
+    function getLockMultiplier(address lpToken, uint256 secs) external view returns (uint256 multiplier) {
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
+            return 0;
+        }
+        return IKodiakFarm(farm).lockMultiplier(secs);
+    }
+
+    /**
+     * @notice Get combined weight for adapter in farm (includes multipliers)
+     * @param lpToken LP token address
+     * @return weight Combined weight value
+     */
+    function getCombinedWeight(address lpToken) external view returns (uint256 weight) {
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
+            return 0;
+        }
+        return IKodiakFarm(farm).combinedWeightOf(address(this));
+    }
+
+    /**
+     * @notice Get the configured lock duration for an LP token
+     * @param lpToken LP token address
+     * @return Duration in seconds
+     */
+    function getLockDuration(address lpToken) external view returns (uint256) {
+        return lpLockDuration[lpToken];
+    }
+
+    /**
+     * @notice Get farm address for LP token (replaces lpToGauge)
+     * @param lpToken LP token address
+     * @return Farm contract address
+     */
+    function lpToGauge(address lpToken) external view returns (address) {
+        return lpToFarm[lpToken];
     }
 
     /**
@@ -927,18 +1227,66 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Register gauge for LP token staking
+     * @notice Register farm for LP token staking
+     * @dev Replaces the old registerGauge function for locked staking model
      * @param lpToken LP token address
-     * @param gauge Gauge contract address
+     * @param farm Farm contract address
      */
-    function registerGauge(address lpToken, address gauge) external onlyOwner {
-        if (lpToken == address(0) || gauge == address(0)) {
+    function registerFarm(address lpToken, address farm) external onlyOwner {
+        if (lpToken == address(0) || farm == address(0)) {
             revert APIARY__ZERO_ADDRESS();
         }
 
-        lpToGauge[lpToken] = gauge;
+        // Validate farm accepts this LP token
+        require(IKodiakFarm(farm).stakingToken() == lpToken, "Farm LP mismatch");
 
-        emit GaugeRegistered(lpToken, gauge);
+        lpToFarm[lpToken] = farm;
+
+        emit FarmRegistered(lpToken, farm);
+    }
+
+    /**
+     * @notice Alias for registerFarm (backward compatibility)
+     */
+    function registerGauge(address lpToken, address farm) external onlyOwner {
+        if (lpToken == address(0) || farm == address(0)) {
+            revert APIARY__ZERO_ADDRESS();
+        }
+
+        require(IKodiakFarm(farm).stakingToken() == lpToken, "Farm LP mismatch");
+
+        lpToFarm[lpToken] = farm;
+
+        emit FarmRegistered(lpToken, farm);
+    }
+
+    /**
+     * @notice Set lock duration for staking LP tokens
+     * @dev Must be >= farm's minimum lock time
+     * @param lpToken LP token address
+     * @param _seconds Lock duration in seconds
+     * 
+     * Lock Duration Guide:
+     * - Minimum: farm.lock_time_min() (usually 7 days)
+     * - For max rewards: farm.lock_time_for_max_multiplier() (usually 365 days)
+     * - Final value depends on partnership deal negotiation
+     */
+    function setLockDuration(address lpToken, uint256 _seconds) external onlyOwner {
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
+            revert APIARY__FARM_NOT_REGISTERED();
+        }
+
+        // Validate against farm's minimum lock time
+        uint256 minLock = IKodiakFarm(farm).lock_time_min();
+        if (_seconds < minLock) {
+            revert APIARY__LOCK_DURATION_TOO_SHORT();
+        }
+
+        uint256 oldDuration = lpLockDuration[lpToken];
+        lpLockDuration[lpToken] = _seconds;
+
+        emit LockDurationUpdated(lpToken, oldDuration, _seconds);
     }
 
     /**
@@ -1058,6 +1406,84 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
 
         if (currentAllowance < amount) {
             IERC20(token).forceApprove(spender, type(uint256).max);
+        }
+    }
+
+    /**
+     * @notice Remove a specific stake ID from tracking array
+     * @param lpToken LP token address
+     * @param kekId The stake ID to remove
+     */
+    function _removeStakeId(address lpToken, bytes32 kekId) internal {
+        bytes32[] storage stakeIds = lpStakeIds[lpToken];
+        uint256 length = stakeIds.length;
+        
+        for (uint256 i = 0; i < length; i++) {
+            if (stakeIds[i] == kekId) {
+                // Move last element to this position and pop
+                stakeIds[i] = stakeIds[length - 1];
+                stakeIds.pop();
+                return;
+            }
+        }
+    }
+
+    /**
+     * @notice Sync tracked stake IDs with actual farm state
+     * @dev Called after withdrawLockedAll() to clean up withdrawn stakes
+     * @param lpToken LP token address
+     * @return removedCount Number of stakes that were removed from tracking
+     */
+    function _syncStakeIds(address lpToken) internal returns (uint256 removedCount) {
+        address farm = lpToFarm[lpToken];
+        if (farm == address(0)) {
+            return 0;
+        }
+
+        // Get current stakes from farm
+        IKodiakFarm.LockedStake[] memory currentStakes = IKodiakFarm(farm).lockedStakesOf(address(this));
+        
+        // Build a set of current kek_ids for O(1) lookup
+        // Using a simple array check since stake count is typically small
+        bytes32[] storage trackedIds = lpStakeIds[lpToken];
+        
+        // Create new array with only valid stakes
+        bytes32[] memory validIds = new bytes32[](currentStakes.length);
+        uint256 validCount = 0;
+        
+        for (uint256 i = 0; i < currentStakes.length; i++) {
+            bytes32 kekId = currentStakes[i].kek_id;
+            if (isOurStake[kekId]) {
+                validIds[validCount] = kekId;
+                validCount++;
+            }
+        }
+
+        // Calculate removed count
+        removedCount = trackedIds.length > validCount ? trackedIds.length - validCount : 0;
+
+        // Clean up isOurStake and stakeIdToLP for removed stakes
+        for (uint256 i = 0; i < trackedIds.length; i++) {
+            bytes32 kekId = trackedIds[i];
+            bool stillExists = false;
+            
+            for (uint256 j = 0; j < validCount; j++) {
+                if (validIds[j] == kekId) {
+                    stillExists = true;
+                    break;
+                }
+            }
+            
+            if (!stillExists) {
+                isOurStake[kekId] = false;
+                delete stakeIdToLP[kekId];
+            }
+        }
+
+        // Replace tracked array with valid stakes only
+        delete lpStakeIds[lpToken];
+        for (uint256 i = 0; i < validCount; i++) {
+            lpStakeIds[lpToken].push(validIds[i]);
         }
     }
 }

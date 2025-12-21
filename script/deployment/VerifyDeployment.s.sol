@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import "forge-std/Script.sol";
-import "../../src/ApiaryToken.sol";
-import "../../src/sApiary.sol";
-import "../../src/ApiaryStaking.sol";
-import "../../src/ApiaryStakingWarmup.sol";
-import "../../src/ApiaryTreasury.sol";
-import "../../src/ApiaryBondDepository.sol";
-import "../../src/ApiaryPreSaleBond.sol";
-import "../../src/ApiaryYieldManager.sol";
-import "../../src/ApiaryInfraredAdapter.sol";
-import "../../src/ApiaryKodiakAdapter.sol";
-import "../../src/interfaces/IApiaryToken.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Script, console} from "forge-std/Script.sol";
+import {ApiaryToken} from "../../src/ApiaryToken.sol";
+import {sApiary} from "../../src/sApiary.sol";
+import {ApiaryStaking} from "../../src/ApiaryStaking.sol";
+import {ApiaryStakingWarmup} from "../../src/ApiaryStakingWarmup.sol";
+import {ApiaryTreasury} from "../../src/ApiaryTreasury.sol";
+import {ApiaryBondDepository} from "../../src/ApiaryBondDepository.sol";
+import {ApiaryPreSaleBond} from "../../src/ApiaryPreSaleBond.sol";
+import {ApiaryYieldManager} from "../../src/ApiaryYieldManager.sol";
+import {ApiaryInfraredAdapter} from "../../src/ApiaryInfraredAdapter.sol";
+import {ApiaryKodiakAdapter} from "../../src/ApiaryKodiakAdapter.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
  * @title VerifyDeployment
@@ -232,6 +231,20 @@ contract VerifyDeployment is Script {
         _check("KA APIARY token", address(kodiakAdapter.apiary()) == address(apiary));
         _check("KA treasury", kodiakAdapter.treasury() == address(treasury));
         _check("KA yield manager", kodiakAdapter.yieldManager() == address(yieldManager));
+        
+        // Kodiak Farm Configuration (Phase C check) - uses LP token mapping
+        address farm = kodiakAdapter.lpToFarm(address(apiaryHoneyLP));
+        uint256 lockDuration = kodiakAdapter.lpLockDuration(address(apiaryHoneyLP));
+        
+        if (farm == address(0)) {
+            console.log("  [INFO] KA farm: NOT CONFIGURED (Phase C pending)");
+            console.log("         Run 08_ConfigureKodiakFarm.s.sol after creating LP farm");
+        } else {
+            _check("KA farm configured", farm != address(0));
+            _check("KA lock duration > 0", lockDuration > 0);
+            console.log("  [INFO] KA farm:", farm);
+            console.log("  [INFO] KA lock duration:", lockDuration / 1 days, "days");
+        }
         
         console.log("");
     }
