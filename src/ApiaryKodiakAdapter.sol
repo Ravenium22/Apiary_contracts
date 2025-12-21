@@ -560,17 +560,38 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Unstake LP tokens from Kodiak gauge
+     * @notice Unstake LP tokens from Kodiak gauge (sends to caller)
      * @param lpToken LP token address
      * @param amount Amount of LP tokens to unstake
-     * @param recipient Address to receive unstaked LP tokens
      */
-    function unstakeLP(address lpToken, uint256 amount, address recipient)
+    function unstakeLP(address lpToken, uint256 amount)
         external
         onlyYieldManager
         whenNotPaused
         nonReentrant
     {
+        _unstakeLP(lpToken, amount, msg.sender);
+    }
+
+    /**
+     * @notice Unstake LP tokens from Kodiak gauge to specific recipient
+     * @param lpToken LP token address
+     * @param amount Amount of LP tokens to unstake
+     * @param recipient Address to receive unstaked LP tokens
+     */
+    function unstakeLPTo(address lpToken, uint256 amount, address recipient)
+        external
+        onlyYieldManager
+        whenNotPaused
+        nonReentrant
+    {
+        _unstakeLP(lpToken, amount, recipient);
+    }
+
+    /**
+     * @notice Internal unstake implementation
+     */
+    function _unstakeLP(address lpToken, uint256 amount, address recipient) internal {
         if (amount == 0) {
             revert APIARY__INVALID_AMOUNT();
         }
@@ -601,17 +622,43 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Claim rewards from staked LP tokens
+     * @notice Claim rewards from staked LP tokens (sends to caller)
+     * @param lpToken LP token address
+     * @return rewardTokens Array of reward token addresses
+     * @return rewardAmounts Array of reward amounts
+     */
+    function claimLPRewards(address lpToken)
+        external
+        onlyYieldManager
+        whenNotPaused
+        nonReentrant
+        returns (address[] memory rewardTokens, uint256[] memory rewardAmounts)
+    {
+        return _claimLPRewards(lpToken, msg.sender);
+    }
+
+    /**
+     * @notice Claim rewards from staked LP tokens to specific recipient
      * @param lpToken LP token address
      * @param recipient Address to receive rewards
      * @return rewardTokens Array of reward token addresses
      * @return rewardAmounts Array of reward amounts
      */
-    function claimLPRewards(address lpToken, address recipient)
+    function claimLPRewardsTo(address lpToken, address recipient)
         external
         onlyYieldManager
         whenNotPaused
         nonReentrant
+        returns (address[] memory rewardTokens, uint256[] memory rewardAmounts)
+    {
+        return _claimLPRewards(lpToken, recipient);
+    }
+
+    /**
+     * @notice Internal claim implementation
+     */
+    function _claimLPRewards(address lpToken, address recipient)
+        internal
         returns (address[] memory rewardTokens, uint256[] memory rewardAmounts)
     {
         if (recipient == address(0)) {
@@ -682,6 +729,26 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
+     * @notice Get expected output amount for a swap (alias for interface compatibility)
+     * @param tokenIn Input token address
+     * @param tokenOut Output token address
+     * @param amountIn Input amount
+     * @return amountOut Expected output amount
+     */
+    function getAmountOut(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn
+    ) external view returns (uint256 amountOut) {
+        address[] memory path = new address[](2);
+        path[0] = tokenIn;
+        path[1] = tokenOut;
+
+        uint256[] memory amounts = kodiakRouter.getAmountsOut(amountIn, path);
+        amountOut = amounts[1];
+    }
+
+    /**
      * @notice Get expected output for multi-hop swap
      * @param path Array of token addresses
      * @param amountIn Input amount
@@ -705,6 +772,76 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     function poolExists(address tokenA, address tokenB) external view returns (bool exists) {
         address pair = kodiakFactory.getPair(tokenA, tokenB);
         exists = (pair != address(0));
+    }
+
+    /**
+     * @notice Get LP token address for a token pair
+     * @param tokenA Token A address
+     * @param tokenB Token B address
+     * @return lpToken LP token address (address(0) if pool doesn't exist)
+     */
+    function getLPToken(address tokenA, address tokenB) external view returns (address lpToken) {
+        lpToken = kodiakFactory.getPair(tokenA, tokenB);
+    }
+
+    /**
+     * @notice Quote expected LP tokens for adding liquidity
+     * @dev This is an estimate - actual LP received may differ slightly
+     * @param tokenA Address of token A
+     * @param tokenB Address of token B
+     * @param amountA Amount of token A
+     * @param amountB Amount of token B
+     * @return expectedLP Estimated LP tokens to receive
+     */
+    function quoteAddLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 amountA,
+        uint256 amountB
+    ) external view returns (uint256 expectedLP) {
+        address pair = kodiakFactory.getPair(tokenA, tokenB);
+        
+        if (pair == address(0)) {
+            // New pool - LP tokens will be sqrt(amountA * amountB) minus minimum liquidity
+            expectedLP = _sqrt(amountA * amountB);
+            if (expectedLP > 1000) {
+                expectedLP -= 1000; // Subtract MINIMUM_LIQUIDITY
+            }
+        } else {
+            // Existing pool - calculate based on reserves
+            (uint112 reserve0, uint112 reserve1,) = IKodiakPair(pair).getReserves();
+            
+            if (reserve0 == 0 || reserve1 == 0) {
+                expectedLP = _sqrt(amountA * amountB);
+            } else {
+                uint256 totalSupply = IERC20(pair).totalSupply();
+                
+                // Sort tokens to match pair ordering
+                (address token0,) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+                (uint256 amount0, uint256 amount1) = tokenA == token0 
+                    ? (amountA, amountB) 
+                    : (amountB, amountA);
+                
+                // LP = min(amount0 * totalSupply / reserve0, amount1 * totalSupply / reserve1)
+                uint256 liquidity0 = (amount0 * totalSupply) / reserve0;
+                uint256 liquidity1 = (amount1 * totalSupply) / reserve1;
+                
+                expectedLP = liquidity0 < liquidity1 ? liquidity0 : liquidity1;
+            }
+        }
+    }
+
+    /**
+     * @notice Internal sqrt function for LP calculation
+     */
+    function _sqrt(uint256 x) internal pure returns (uint256 y) {
+        if (x == 0) return 0;
+        uint256 z = (x + 1) / 2;
+        y = x;
+        while (z < y) {
+            y = z;
+            z = (x / z + z) / 2;
+        }
     }
 
     /**

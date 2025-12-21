@@ -87,6 +87,12 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Reward token from Infrared (may be different from iBGT)
+    IERC20 public rewardToken;
+
+    /// @notice Whether reward token is same as iBGT
+    bool public rewardTokenIsIBGT;
+
     /// @notice Treasury address (receives LP tokens, manages reserves)
     address public treasury;
 
@@ -314,7 +320,7 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         lastExecutionBlock = block.number;
 
         // Claim rewards from Infrared adapter (reverts on failure)
-        _claimYieldFromInfrared(totalYield);
+        totalYield = _claimYieldFromInfrared(totalYield);
 
         // Execute strategy (each step reverts on failure - atomic)
         if (currentStrategy == Strategy.PHASE1_LP_BURN) {
@@ -450,24 +456,70 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
 
     /**
      * @notice Claim yield from Infrared adapter
-     * @param expectedAmount Expected minimum amount to claim
-     * @dev Uses typed interface - reverts on failure (atomic)
+     * @dev Handles the case where reward token may differ from iBGT
+     *      If reward token ≠ iBGT, swaps to iBGT first
+     * @param expectedAmount Minimum expected amount (for verification)
+     * @return claimedAmount Actual iBGT-equivalent amount claimed
      */
-    function _claimYieldFromInfrared(uint256 expectedAmount) internal {
+    function _claimYieldFromInfrared(uint256 expectedAmount) internal returns (uint256 claimedAmount) {
         if (infraredAdapter == address(0)) {
             revert APIARY__ADAPTER_NOT_SET();
         }
 
-        uint256 balanceBefore = ibgtToken.balanceOf(address(this));
+        // Claim rewards from adapter
+        uint256 rewardsClaimed = IApiaryInfraredAdapter(infraredAdapter).claimRewards();
 
-        // Use typed interface for claim
-        uint256 claimed = IApiaryInfraredAdapter(infraredAdapter).claimRewards();
+        if (rewardsClaimed == 0) {
+            revert APIARY__CLAIM_FAILED();
+        }
 
-        uint256 balanceAfter = ibgtToken.balanceOf(address(this));
-        uint256 actualReceived = balanceAfter - balanceBefore;
+        // If reward token is iBGT, we're done
+        if (rewardTokenIsIBGT || address(rewardToken) == address(0)) {
+            // Verify we received iBGT
+            claimedAmount = rewardsClaimed;
+        } else {
+            // Reward token is different - need to swap to iBGT
+            // Check if we have a path through HONEY
+            if (kodiakAdapter == address(0)) {
+                revert APIARY__ADAPTER_NOT_SET();
+            }
 
-        // Verify tokens were received and match expected
-        if (actualReceived == 0 || claimed == 0 || actualReceived < expectedAmount) {
+            // Approve and swap reward token → iBGT
+            rewardToken.forceApprove(kodiakAdapter, rewardsClaimed);
+
+            // Try direct swap first
+            try IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
+                address(rewardToken),
+                address(ibgtToken),
+                rewardsClaimed
+            ) returns (uint256 expectedOut) {
+                uint256 minOut = _calculateMinOutput(expectedOut);
+                
+                claimedAmount = IApiaryKodiakAdapter(kodiakAdapter).swap(
+                    address(rewardToken),
+                    address(ibgtToken),
+                    rewardsClaimed,
+                    minOut,
+                    address(this)
+                );
+            } catch {
+                // Direct swap failed - try through HONEY
+                address[] memory path = new address[](3);
+                path[0] = address(rewardToken);
+                path[1] = address(honeyToken);
+                path[2] = address(ibgtToken);
+
+                claimedAmount = IApiaryKodiakAdapter(kodiakAdapter).swapMultiHop(
+                    path,
+                    rewardsClaimed,
+                    0, // Accept any amount in emergency
+                    address(this)
+                );
+            }
+        }
+
+        // Verify minimum amount received
+        if (claimedAmount < expectedAmount) {
             revert APIARY__CLAIM_FAILED();
         }
     }
@@ -902,6 +954,19 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
      */
     function setStakingContract(address _staking) external onlyOwner {
         stakingContract = _staking;
+    }
+
+    /**
+     * @notice Set reward token address
+     * @dev Call after deployment once Infrared's reward token is known
+     * @param _rewardToken Address of Infrared's reward token
+     */
+    function setRewardToken(address _rewardToken) external onlyOwner {
+        if (_rewardToken == address(0)) {
+            revert APIARY__ZERO_ADDRESS();
+        }
+        rewardToken = IERC20(_rewardToken);
+        rewardTokenIsIBGT = (_rewardToken == address(ibgtToken));
     }
 
     /**

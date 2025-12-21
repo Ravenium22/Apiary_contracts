@@ -73,7 +73,7 @@ contract ApiaryToken is ERC20Permit, VaultOwned, AccessControl {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
     
-    constructor(address protocolAdmin) ERC20("Apiary", "APIARY", 9) {
+    constructor(address protocolAdmin) ERC20("Apiary", "APIARY", 9) VaultOwned(protocolAdmin) {
         if (protocolAdmin == address(0)) {
             revert APIARY__INVALID_ADDRESS();
         }

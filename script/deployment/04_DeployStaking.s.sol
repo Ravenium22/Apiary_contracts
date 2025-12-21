@@ -23,6 +23,7 @@ import "../../src/ApiaryStakingWarmup.sol";
  *   - EPOCH_LENGTH: Length of each epoch in blocks (e.g., 28800 for 8 hours on Berachain)
  *   - FIRST_EPOCH_NUMBER: Starting epoch number (usually 0)
  *   - FIRST_EPOCH_BLOCK: Block number when first epoch ends
+ *   - PROTOCOL_ADMIN: Address of the protocol admin/owner
  */
 contract DeployStaking is Script {
     
@@ -33,6 +34,7 @@ contract DeployStaking is Script {
         uint256 epochLength = vm.envUint("EPOCH_LENGTH");
         uint256 firstEpochNumber = vm.envUint("FIRST_EPOCH_NUMBER");
         uint256 firstEpochBlock = vm.envUint("FIRST_EPOCH_BLOCK");
+        address protocolAdmin = vm.envAddress("PROTOCOL_ADMIN");
         
         console.log("=== Deploying Apiary Staking ===");
         console.log("APIARY:", apiary);
@@ -40,18 +42,20 @@ contract DeployStaking is Script {
         console.log("Epoch Length:", epochLength, "blocks");
         console.log("First Epoch Number:", firstEpochNumber);
         console.log("First Epoch Block:", firstEpochBlock);
+        console.log("Protocol Admin:", protocolAdmin);
         console.log("Chain ID:", block.chainid);
         
         vm.startBroadcast();
         
         // Deploy Staking contract
-        // Constructor: ApiaryStaking(_APIARY, _sAPIARY, _epochLength, _firstEpochNumber, _firstEpochBlock)
+        // Constructor: ApiaryStaking(_APIARY, _sAPIARY, _epochLength, _firstEpochNumber, _firstEpochBlock, _initialOwner)
         ApiaryStaking stakingContract = new ApiaryStaking(
             apiary,
             sApiaryAddr,
             epochLength,
             firstEpochNumber,
-            firstEpochBlock
+            firstEpochBlock,
+            protocolAdmin
         );
         
         // Deploy Warmup contract
@@ -66,6 +70,7 @@ contract DeployStaking is Script {
         console.log("\n=== Staking Contracts Deployed ===");
         console.log("Staking:", address(stakingContract));
         console.log("Warmup:", address(warmupContract));
+        console.log("Owner:", stakingContract.owner());
         
         // Get epoch info
         (uint256 length, uint256 number, uint256 endBlock, uint256 distribute) = stakingContract.epoch();
@@ -77,6 +82,7 @@ contract DeployStaking is Script {
         console.log("  Distribute:", distribute, "(Phase 1: no yield)");
         
         // Sanity checks
+        require(stakingContract.owner() == protocolAdmin, "Owner not set correctly");
         require(stakingContract.APIARY() == apiary, "APIARY not set");
         require(stakingContract.sAPIARY() == sApiaryAddr, "sAPIARY not set");
         require(length == epochLength, "Epoch length incorrect");
@@ -88,6 +94,7 @@ contract DeployStaking is Script {
         require(address(warmupContract.sAPIARY()) == sApiaryAddr, "Warmup sAPIARY not set");
         
         console.log(unicode"\n✓ Staking deployment successful!");
+        console.log(unicode"✓ Owner verified");
         console.log(unicode"✓ Epoch configuration verified");
         console.log(unicode"✓ Warmup contract verified");
         console.log(unicode"\n⚠ Next steps:");

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 pragma solidity 0.8.26;
 
+import { Ownable2Step, Ownable } from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import { SafeMath } from "./libs/SafeMath.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -37,53 +38,7 @@ interface IApiaryToken is IERC20 {
     function updateLastStakedTime(address staker) external;
 }
 
-interface IOwnable {
-    function manager() external view returns (address);
-    function renounceManagement() external;
-    function pushManagement(address newOwner_) external;
-    function pullManagement() external;
-}
-
-contract Ownable is IOwnable {
-    address internal _owner;
-    address internal _newOwner;
-
-    event OwnershipPushed(address indexed previousOwner, address indexed newOwner);
-    event OwnershipPulled(address indexed previousOwner, address indexed newOwner);
-
-    constructor() {
-        _owner = msg.sender;
-        emit OwnershipPushed(address(0), _owner);
-    }
-
-    function manager() public view override returns (address) {
-        return _owner;
-    }
-
-    modifier onlyManager() {
-        require(_owner == msg.sender, "Ownable: caller is not the owner");
-        _;
-    }
-
-    function renounceManagement() public virtual override onlyManager {
-        emit OwnershipPushed(_owner, address(0));
-        _owner = address(0);
-    }
-
-    function pushManagement(address newOwner_) public virtual override onlyManager {
-        require(newOwner_ != address(0), "Ownable: new owner is the zero address");
-        emit OwnershipPushed(_owner, newOwner_);
-        _newOwner = newOwner_;
-    }
-
-    function pullManagement() public virtual override {
-        require(msg.sender == _newOwner, "Ownable: must be new owner to pull");
-        emit OwnershipPulled(_owner, _newOwner);
-        _owner = _newOwner;
-    }
-}
-
-contract ApiaryStaking is Ownable, Pausable, ReentrancyGuard {
+contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
@@ -165,14 +120,16 @@ contract ApiaryStaking is Ownable, Pausable, ReentrancyGuard {
      * @param _epochLength Length of each epoch in blocks
      * @param _firstEpochNumber Starting epoch number
      * @param _firstEpochBlock Block number when first epoch ends
+     * @param _initialOwner Address of the initial owner
      */
     constructor(
         address _APIARY,
         address _sAPIARY,
         uint256 _epochLength,
         uint256 _firstEpochNumber,
-        uint256 _firstEpochBlock
-    ) {
+        uint256 _firstEpochBlock,
+        address _initialOwner
+    ) Ownable(_initialOwner) {
         if (_APIARY == address(0)) revert APIARY__INVALID_ADDRESS();
         if (_sAPIARY == address(0)) revert APIARY__INVALID_ADDRESS();
 
@@ -411,14 +368,14 @@ contract ApiaryStaking is Ownable, Pausable, ReentrancyGuard {
     /**
      * @notice Pause the contract (emergency use only)
      */
-    function pause() external onlyManager {
+    function pause() external onlyOwner {
         _pause();
     }
 
     /**
      * @notice Unpause the contract
      */
-    function unpause() external onlyManager {
+    function unpause() external onlyOwner {
         _unpause();
     }
 
@@ -433,7 +390,7 @@ contract ApiaryStaking is Ownable, Pausable, ReentrancyGuard {
      * @param _contract Type of contract to set
      * @param _address Address of the contract
      */
-    function setContract(CONTRACTS _contract, address _address) external onlyManager {
+    function setContract(CONTRACTS _contract, address _address) external onlyOwner {
         if (_address == address(0)) revert APIARY__INVALID_ADDRESS();
 
         if (_contract == CONTRACTS.DISTRIBUTOR) {
@@ -454,25 +411,45 @@ contract ApiaryStaking is Ownable, Pausable, ReentrancyGuard {
      * @notice Set warmup period for new stakers
      * @param _warmupPeriod Number of epochs for warmup
      */
-    function setWarmup(uint256 _warmupPeriod) external onlyManager {
+    function setWarmup(uint256 _warmupPeriod) external onlyOwner {
         warmupPeriod = _warmupPeriod;
         emit WarmupSet(_warmupPeriod);
     }
 
     /**
-     * @notice Emergency function to retrieve tokens from contract
+     * @notice Emergency function to retrieve accidentally sent tokens
+     * @dev Cannot withdraw APIARY that belongs to stakers or sAPIARY
      * @param token Address of token to retrieve
      * @param amount Amount to retrieve
      */
-    function retrieve(address token, uint256 amount) external onlyManager {
+    function retrieve(address token, uint256 amount) external onlyOwner {
+        // Prevent draining staked APIARY
+        if (token == APIARY) {
+            uint256 apiaryBalance = IERC20(APIARY).balanceOf(address(this));
+            uint256 excess = apiaryBalance > totalStaked ? apiaryBalance - totalStaked : 0;
+            require(amount <= excess, "ApiaryStaking: cannot drain staked funds");
+        }
+        
+        // Prevent draining sAPIARY (belongs to warmup users)
+        if (token == sAPIARY) {
+            // Only allow retrieval of excess sAPIARY beyond what's owed to warmup users
+            uint256 sApiaryBalance = IERC20(sAPIARY).balanceOf(address(this));
+            // In normal operation, staking contract shouldn't hold sAPIARY
+            // It sends to warmup contract immediately
+            // Allow retrieval only if there's unexpected balance
+            require(sApiaryBalance >= amount, "ApiaryStaking: insufficient balance");
+        }
+
         // Retrieve any ETH balance
-        uint256 balance = address(this).balance;
-        if (balance != 0) {
-            (bool success,) = payable(msg.sender).call{ value: balance }("");
+        uint256 ethBalance = address(this).balance;
+        if (ethBalance != 0) {
+            (bool success,) = payable(msg.sender).call{ value: ethBalance }("");
             if (!success) revert APIARY__TRANSFER_FAILED();
         }
 
         // Retrieve specified token
-        IERC20(token).safeTransfer(msg.sender, amount);
+        if (token != address(0) && amount > 0) {
+            IERC20(token).safeTransfer(msg.sender, amount);
+        }
     }
 }

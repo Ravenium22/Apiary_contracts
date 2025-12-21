@@ -14,8 +14,11 @@ interface IApiaryToken is IERC20 {
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Emitted when a minter's initial allocation is set
+    event MinterAllocationSet(address indexed minter, uint256 indexed maxNumberOfTokens);
+    
     /// @notice Emitted when a minter's allocation is increased
-    event AllocationIncreased(address indexed minter, uint256 additionalAmount, uint256 newTotal);
+    event MinterAllocationIncreased(address indexed minter, uint256 indexed additionalTokens);
 
     /*//////////////////////////////////////////////////////////////
                             MINTING FUNCTIONS
@@ -25,7 +28,7 @@ interface IApiaryToken is IERC20 {
      * @notice Mint tokens to recipient
      * @param account_ Address to receive tokens
      * @param amount_ Amount to mint
-     * @dev Caller must have minting allocation
+     * @dev Caller must have MINTER_ROLE and sufficient allocation
      */
     function mint(address account_, uint256 amount_) external;
 
@@ -51,43 +54,50 @@ interface IApiaryToken is IERC20 {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Get remaining minting allocation for an address
+     * @notice Get remaining allocation limit for an address
      * @param minter Address to check
      * @return Remaining mintable amount
-     */
-    function mintingAllocation(address minter) external view returns (uint256);
-
-    /**
-     * @notice Get allocation limit for an address
-     * @param minter Address to check
-     * @return Allocation limit
      */
     function allocationLimits(address minter) external view returns (uint256);
 
     /**
-     * @notice Get total amount ever minted by an address
-     * @param minter Address to check
-     * @return Total amount minted
+     * @notice Get total amount ever minted across all minters
+     * @return Total minted supply (historical, doesn't decrease on burn)
      */
-    function totalMinted(address minter) external view returns (uint256);
+    function totalMintedSupply() external view returns (uint256);
+
+    /**
+     * @notice Get last stake timestamp for a user
+     * @param user Address to check
+     * @return Timestamp of last stake
+     */
+    function lastTimeStaked(address user) external view returns (uint48);
 
     /*//////////////////////////////////////////////////////////////
                             ADMIN FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Set minting allocation for an address
-     * @param minter_ Address to set allocation for
-     * @param amount_ Maximum amount that can be minted
-     * @dev Can only be called by owner, only works if current allocation is 0
+     * @notice Set initial allocation limit for a new minter
+     * @param minter Address to set allocation for
+     * @param maxNumberOfTokens Maximum amount that can be minted
+     * @dev Can only be called once per minter (when allocation is 0)
+     *      Automatically grants MINTER_ROLE
      */
-    function setMintingAllocation(address minter_, uint256 amount_) external;
+    function setAllocationLimit(address minter, uint256 maxNumberOfTokens) external;
 
     /**
-     * @notice Increase minting allocation for an address
-     * @param minter_ Address to increase allocation for
-     * @param additionalAmount_ Amount to add to current allocation
-     * @dev Can only be called by owner
+     * @notice Increase allocation limit for existing minter
+     * @param minter Address to increase allocation for
+     * @param additionalTokens Amount to add to current allocation
+     * @dev Minter must already have MINTER_ROLE
      */
-    function increaseAllocationLimit(address minter_, uint256 additionalAmount_) external;
+    function increaseAllocationLimit(address minter, uint256 additionalTokens) external;
+
+    /**
+     * @notice Update last staked timestamp for a user
+     * @param _staker Address of the staker
+     * @dev Only callable by staking contract
+     */
+    function updateLastStakedTime(address _staker) external;
 }

@@ -786,7 +786,7 @@ contract ApiaryKodiakAdapterTest is Test {
         adapter.stakeLP(lpToken, liquidity);
         
         // Unstake
-        adapter.unstakeLP(lpToken, liquidity, treasury);
+        adapter.unstakeLPTo(lpToken, liquidity, treasury);
         vm.stopPrank();
         
         assertEq(adapter.totalStakedLP(lpToken), 0);
@@ -798,7 +798,7 @@ contract ApiaryKodiakAdapterTest is Test {
         
         vm.prank(yieldManager);
         vm.expectRevert(ApiaryKodiakAdapter.APIARY__INSUFFICIENT_LP_STAKED.selector);
-        adapter.unstakeLP(lpToken, 1000e18, treasury);
+        adapter.unstakeLPTo(lpToken, 1000e18, treasury);
     }
     
     function testClaimLPRewards() public {
@@ -828,7 +828,7 @@ contract ApiaryKodiakAdapterTest is Test {
         gauge.setEarnedRewards(address(adapter), address(bgt), 50e18);
         
         // Claim rewards
-        (address[] memory rewardTokens, uint256[] memory rewardAmounts) = adapter.claimLPRewards(lpToken, treasury);
+        (address[] memory rewardTokens, uint256[] memory rewardAmounts) = adapter.claimLPRewardsTo(lpToken, treasury);
         vm.stopPrank();
         
         assertEq(rewardTokens.length, 2);
@@ -1076,10 +1076,10 @@ contract ApiaryKodiakAdapterTest is Test {
         
         // 4. Set and claim rewards
         gauge.setEarnedRewards(address(adapter), address(xkdk), 50e18);
-        adapter.claimLPRewards(lpToken, treasury);
+        adapter.claimLPRewardsTo(lpToken, treasury);
         
         // 5. Unstake LP
-        adapter.unstakeLP(lpToken, liquidity / 2, treasury);
+        adapter.unstakeLPTo(lpToken, liquidity / 2, treasury);
         
         vm.stopPrank();
         

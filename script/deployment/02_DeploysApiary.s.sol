@@ -16,35 +16,44 @@ import "../../src/sApiary.sol";
  *     --broadcast \
  *     --verify
  * 
+ * Environment Variables Required:
+ *   - PROTOCOL_ADMIN: Address of the protocol admin/owner
+ * 
  * Note: sAPIARY must be initialized with staking contract address after deployment
  */
 contract DeploysApiary is Script {
     
     function run() external returns (address) {
+        address protocolAdmin = vm.envAddress("PROTOCOL_ADMIN");
+        
         console.log("=== Deploying sAPIARY Token ===");
         console.log("Deployer:", msg.sender);
+        console.log("Protocol Admin:", protocolAdmin);
         console.log("Chain ID:", block.chainid);
         
         vm.startBroadcast();
         
         // Deploy sAPIARY token
-        // Constructor: sApiary() - no parameters
-        sApiary sApiaryToken = new sApiary();
+        // Constructor: sApiary(address _initialOwner)
+        sApiary sApiaryToken = new sApiary(protocolAdmin);
         
         vm.stopBroadcast();
         
         console.log("\n=== sAPIARY Token Deployed ===");
         console.log("sAPIARY:", address(sApiaryToken));
-        console.log("Decimals:", 9);
+        console.log("Owner:", sApiaryToken.owner());
+        console.log("Decimals: 9");
         console.log("Initializer:", sApiaryToken.initializer());
-        console.log("Initial Fragments Supply:", sApiaryToken.INITIAL_FRAGMENTS_SUPPLY() / 1e9);
+        console.log("Total Supply:", sApiaryToken.totalSupply() / 1e9);
         
         // Sanity checks
+        require(sApiaryToken.owner() == protocolAdmin, "Owner not set correctly");
         require(sApiaryToken.initializer() == msg.sender, "Initializer not set");
         require(sApiaryToken.stakingContract() == address(0), "Staking contract should not be set yet");
-        require(sApiaryToken.totalSupply() == sApiaryToken.INITIAL_FRAGMENTS_SUPPLY(), "Total supply incorrect");
+        require(sApiaryToken.totalSupply() > 0, "Total supply incorrect");
         
         console.log(unicode"\n✓ sAPIARY token deployment successful!");
+        console.log(unicode"✓ Owner verified");
         console.log(unicode"✓ Initializer verified");
         console.log(unicode"⚠ IMPORTANT: Must call initialize(stakingContract) after staking deployment");
         

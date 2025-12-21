@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 pragma solidity 0.8.26;
 
+import { Ownable2Step, Ownable } from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import { SafeMath } from "./libs/SafeMath.sol";
 import { ERC20 } from "./libs/ERC20.sol";
 import { IERC20 } from "./interfaces/IERC20.sol";
@@ -67,61 +68,12 @@ abstract contract ERC20Permit is ERC20, IERC2612Permit {
         _approve(owner, spender, amount);
     }
 
-    function nonces(address owner) public view override returns (uint256) {
-        return _nonces[owner].current();
+    function nonces(address owner_) public view override returns (uint256) {
+        return _nonces[owner_].current();
     }
 }
 
-interface IOwnable {
-    function manager() external view returns (address);
-
-    function renounceManagement() external;
-
-    function pushManagement(address newOwner_) external;
-
-    function pullManagement() external;
-}
-
-contract Ownable is IOwnable {
-    address internal _owner;
-    address internal _newOwner;
-
-    event OwnershipPushed(address indexed previousOwner, address indexed newOwner);
-    event OwnershipPulled(address indexed previousOwner, address indexed newOwner);
-
-    constructor() {
-        _owner = msg.sender;
-        emit OwnershipPushed(address(0), _owner);
-    }
-
-    function manager() public view override returns (address) {
-        return _owner;
-    }
-
-    modifier onlyManager() {
-        require(_owner == msg.sender, "Ownable: caller is not the owner");
-        _;
-    }
-
-    function renounceManagement() public virtual override onlyManager {
-        emit OwnershipPushed(_owner, address(0));
-        _owner = address(0);
-    }
-
-    function pushManagement(address newOwner_) public virtual override onlyManager {
-        require(newOwner_ != address(0), "Ownable: new owner is the zero address");
-        emit OwnershipPushed(_owner, newOwner_);
-        _newOwner = newOwner_;
-    }
-
-    function pullManagement() public virtual override {
-        require(msg.sender == _newOwner, "Ownable: must be new owner to pull");
-        emit OwnershipPulled(_owner, _newOwner);
-        _owner = _newOwner;
-    }
-}
-
-contract sApiary is ERC20Permit, Ownable {
+contract sApiary is ERC20Permit, Ownable2Step {
     using SafeMath for uint256;
 
     /*//////////////////////////////////////////////////////////////
@@ -203,7 +155,7 @@ contract sApiary is ERC20Permit, Ownable {
                             CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor() ERC20("Staked Apiary", "sAPIARY", 9) ERC20Permit() {
+    constructor(address _initialOwner) ERC20("Staked Apiary", "sAPIARY", 9) ERC20Permit() Ownable(_initialOwner) {
         initializer = msg.sender;
         _totalSupply = INITIAL_FRAGMENTS_SUPPLY;
         _gonsPerFragment = TOTAL_GONS.div(_totalSupply);
@@ -235,10 +187,10 @@ contract sApiary is ERC20Permit, Ownable {
 
     /**
      * @notice Set the initial index for the staking system.
-     * @dev Can only be called once by the manager, and only before INDEX is set.
+     * @dev Can only be called once by the owner, and only before INDEX is set.
      * @param _INDEX The initial index value (in token amounts, will be converted to gons).
      */
-    function setIndex(uint256 _INDEX) external onlyManager returns (bool) {
+    function setIndex(uint256 _INDEX) external onlyOwner returns (bool) {
         require(INDEX == 0, "sApiary: index already set");
         INDEX = gonsForBalance(_INDEX);
         return true;
@@ -279,6 +231,9 @@ contract sApiary is ERC20Permit, Ownable {
         if (_totalSupply > MAX_SUPPLY) {
             _totalSupply = MAX_SUPPLY;
         }
+
+        // Prevent division by zero
+        require(_totalSupply > 0, "sApiary: zero supply");
 
         // Update the conversion rate (this is what makes balances increase)
         _gonsPerFragment = TOTAL_GONS.div(_totalSupply);

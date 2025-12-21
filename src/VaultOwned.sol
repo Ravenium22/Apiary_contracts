@@ -2,65 +2,32 @@
 
 pragma solidity 0.8.26;
 
-interface IOwnable {
-    function owner() external view returns (address);
+import { Ownable2Step, Ownable } from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
-    function renounceOwnership() external;
-
-    function transferOwnership(address newOwner_) external;
-}
-
-contract Ownable is IOwnable {
-    address internal _owner;
-
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-
-    constructor() {
-        _owner = msg.sender;
-        emit OwnershipTransferred(address(0), _owner);
-    }
-
-    function owner() public view override returns (address) {
-        return _owner;
-    }
-
-    modifier onlyOwner() {
-        require(_owner == msg.sender, "Ownable: caller is not the owner");
-        _;
-    }
-
-    function renounceOwnership() public virtual override onlyOwner {
-        emit OwnershipTransferred(_owner, address(0));
-        _owner = address(0);
-    }
-
-    function transferOwnership(address newOwner_) public virtual override onlyOwner {
-        require(newOwner_ != address(0), "Ownable: new owner is the zero address");
-        emit OwnershipTransferred(_owner, newOwner_);
-        _owner = newOwner_;
-    }
-}
-
-contract VaultOwned is Ownable {
+/**
+ * @title VaultOwned
+ * @notice Extends Ownable2Step with vault, staking, and lockup address management
+ * @dev Provides modifiers for restricted access to vault, lockup, and staking contracts
+ */
+contract VaultOwned is Ownable2Step {
     address internal _vault;
     address internal _staking;
     address internal _lockUp;
 
+    constructor(address _initialOwner) Ownable(_initialOwner) {}
+
     function setVault(address vault_) external onlyOwner returns (bool) {
         _vault = vault_;
-
         return true;
     }
 
     function setLockUp(address lockUp_) external onlyOwner returns (bool) {
         _lockUp = lockUp_;
-
         return true;
     }
 
     function setStaking(address staking_) external onlyOwner returns (bool) {
         _staking = staking_;
-
         return true;
     }
 
