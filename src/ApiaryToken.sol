@@ -39,6 +39,7 @@ contract ApiaryToken is ERC20Permit, VaultOwned, AccessControl {
     uint256 internal constant BULLAS_BOOGA_ALLOCATION = 30_000e9; // 15%
     uint256 internal constant LIQUIDITY_ALLOCATION = 20_000e9; // 10%
     uint256 internal constant KODIAK_ALLOCATION = 10_000e9; // 5%
+    uint256 internal constant INITIAL_SUPPLY = 200_000e9; // 200,000 APIARY with 9 decimals
 
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
@@ -58,6 +59,7 @@ contract ApiaryToken is ERC20Permit, VaultOwned, AccessControl {
     //////////////////////////////////////////////////////////////*/
     event MinterAllocationSet(address indexed minter, uint256 indexed maxNumberOfTokens);
     event MinterAllocationIncreased(address indexed minter, uint256 indexed additionalTokens);
+    event InitialSupplyMinted(address indexed recipient, uint256 indexed amount);
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -79,6 +81,12 @@ contract ApiaryToken is ERC20Permit, VaultOwned, AccessControl {
         }
 
         _grantRole(DEFAULT_ADMIN_ROLE, protocolAdmin);
+
+        // Mint initial 200k supply to deployer (msg.sender)
+        _mint(msg.sender, INITIAL_SUPPLY);
+        totalMintedSupply = INITIAL_SUPPLY;
+
+        emit InitialSupplyMinted(msg.sender, INITIAL_SUPPLY);
     }
 
     /*//////////////////////////////////////////////////////////////

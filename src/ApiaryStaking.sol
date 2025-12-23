@@ -12,7 +12,7 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.s
  * @title ApiaryStaking
  * @notice Staking contract for Apiary protocol
  * @dev Allows users to stake APIARY tokens and receive sAPIARY (staked APIARY) in return.
- *      Features a warmup period before stakers can claim their sAPIARY.
+ *      Staking is instant - users receive sAPIARY immediately upon staking.
  *      Phase 1: No yield distribution (epoch.distribute = 0)
  *      Phase 2: Yield distribution enabled via distributor
  */
@@ -24,10 +24,6 @@ interface IsAPIARY {
     function gonsForBalance(uint256 amount) external view returns (uint256);
     function balanceForGons(uint256 gons) external view returns (uint256);
     function index() external view returns (uint256);
-}
-
-interface IWarmup {
-    function retrieve(address staker_, uint256 amount_) external;
 }
 
 interface IDistributor {
@@ -66,23 +62,8 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
 
     address public distributor;    // Distributor contract (optional, for Phase 2)
     address public locker;         // Locker contract (optional, for lockup mechanism)
-    address public warmupContract; // Warmup contract that holds sAPIARY during warmup
 
-    uint256 public warmupPeriod;   // Number of epochs for warmup
     uint256 public totalBonus;     // Total bonus provided to locker
-
-    /*//////////////////////////////////////////////////////////////
-                        WARMUP TRACKING
-    //////////////////////////////////////////////////////////////*/
-
-    struct Claim {
-        uint256 deposit;   // Amount of APIARY deposited
-        uint256 gons;      // Amount of gons (internal sAPIARY accounting)
-        uint256 expiry;    // Epoch when warmup expires
-        bool lock;         // Prevents malicious delays (user can lock their own deposits)
-    }
-
-    mapping(address => Claim) public warmupInfo;
 
     /*//////////////////////////////////////////////////////////////
                         EVENTS
@@ -90,12 +71,8 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
 
     event Staked(address indexed user, uint256 amount, address indexed recipient);
     event Unstaked(address indexed user, uint256 amount);
-    event Claimed(address indexed user, uint256 amount);
-    event Forfeited(address indexed user, uint256 amount);
     event Rebased(uint256 indexed epoch, uint256 distribute);
-    event WarmupSet(uint256 warmupPeriod);
     event DistributorSet(address indexed distributor);
-    event WarmupContractSet(address indexed warmupContract);
     event LockerSet(address indexed locker);
 
     /*//////////////////////////////////////////////////////////////
@@ -103,9 +80,7 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     error APIARY__INVALID_ADDRESS();
-    error APIARY__DEPOSITS_LOCKED();
     error APIARY__ONLY_LOCKER();
-    error APIARY__WARMUP_ALREADY_SET();
     error APIARY__LOCKER_ALREADY_SET();
     error APIARY__TRANSFER_FAILED();
 
@@ -150,11 +125,10 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Stake APIARY tokens to enter warmup period
-     * @dev User sends APIARY, contract sends sAPIARY to warmup contract
-     *      After warmup period, user can claim sAPIARY from warmup contract
+     * @notice Stake APIARY tokens and receive sAPIARY instantly
+     * @dev User sends APIARY, contract sends sAPIARY directly to recipient
      * @param _amount Amount of APIARY to stake
-     * @param _recipient Address that will receive the sAPIARY after warmup
+     * @param _recipient Address that will receive the sAPIARY
      * @return bool Success status
      */
     function stake(uint256 _amount, address _recipient) 
@@ -171,66 +145,13 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
         // Transfer APIARY from user to this contract
         IERC20(APIARY).safeTransferFrom(msg.sender, address(this), _amount);
 
-        Claim memory info = warmupInfo[_recipient];
-        if (info.lock) revert APIARY__DEPOSITS_LOCKED();
-
-        // Update warmup info: accumulate deposit, gons, and set expiry
-        warmupInfo[_recipient] = Claim({
-            deposit: info.deposit.add(_amount),
-            gons: info.gons.add(IsAPIARY(sAPIARY).gonsForBalance(_amount)),
-            expiry: epoch.number.add(warmupPeriod),
-            lock: false
-        });
-
         totalStaked = totalStaked.add(_amount);
 
-        // Transfer sAPIARY to warmup contract (1:1 with APIARY initially)
-        IERC20(sAPIARY).safeTransfer(warmupContract, _amount);
+        // Transfer sAPIARY directly to recipient (1:1 with APIARY)
+        IERC20(sAPIARY).safeTransfer(_recipient, _amount);
 
         emit Staked(msg.sender, _amount, _recipient);
         return true;
-    }
-
-    /**
-     * @notice Claim sAPIARY from warmup after warmup period expires
-     * @param _recipient Address to claim for
-     */
-    function claim(address _recipient) public whenNotPaused nonReentrant {
-        Claim memory info = warmupInfo[_recipient];
-        
-        if (epoch.number >= info.expiry && info.expiry != 0) {
-            delete warmupInfo[_recipient];
-            
-            uint256 claimAmount = IsAPIARY(sAPIARY).balanceForGons(info.gons);
-            IWarmup(warmupContract).retrieve(_recipient, claimAmount);
-            
-            emit Claimed(_recipient, claimAmount);
-        }
-    }
-
-    /**
-     * @notice Forfeit sAPIARY in warmup and retrieve original APIARY deposit
-     * @dev Returns the original APIARY deposit amount, even if sAPIARY value changed during warmup
-     */
-    function forfeit() external whenNotPaused nonReentrant {
-        Claim memory info = warmupInfo[msg.sender];
-        delete warmupInfo[msg.sender];
-
-        // Retrieve sAPIARY from warmup contract back to staking contract
-        IWarmup(warmupContract).retrieve(address(this), IsAPIARY(sAPIARY).balanceForGons(info.gons));
-        
-        // Return original APIARY deposit to user
-        IERC20(APIARY).safeTransfer(msg.sender, info.deposit);
-
-        emit Forfeited(msg.sender, info.deposit);
-    }
-
-    /**
-     * @notice Toggle deposit lock to prevent new deposits (protection from malicious activity)
-     * @dev Users can lock their own deposits to prevent someone else from adding to their warmup
-     */
-    function toggleDepositLock() external whenNotPaused {
-        warmupInfo[msg.sender].lock = !warmupInfo[msg.sender].lock;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -381,7 +302,6 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
 
     enum CONTRACTS {
         DISTRIBUTOR,
-        WARMUP,
         LOCKER
     }
 
@@ -396,24 +316,11 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
         if (_contract == CONTRACTS.DISTRIBUTOR) {
             distributor = _address;
             emit DistributorSet(_address);
-        } else if (_contract == CONTRACTS.WARMUP) {
-            if (warmupContract != address(0)) revert APIARY__WARMUP_ALREADY_SET();
-            warmupContract = _address;
-            emit WarmupContractSet(_address);
         } else if (_contract == CONTRACTS.LOCKER) {
             if (locker != address(0)) revert APIARY__LOCKER_ALREADY_SET();
             locker = _address;
             emit LockerSet(_address);
         }
-    }
-
-    /**
-     * @notice Set warmup period for new stakers
-     * @param _warmupPeriod Number of epochs for warmup
-     */
-    function setWarmup(uint256 _warmupPeriod) external onlyOwner {
-        warmupPeriod = _warmupPeriod;
-        emit WarmupSet(_warmupPeriod);
     }
 
     /**
@@ -430,12 +337,12 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
             require(amount <= excess, "ApiaryStaking: cannot drain staked funds");
         }
         
-        // Prevent draining sAPIARY (belongs to warmup users)
+        // Prevent draining sAPIARY
         if (token == sAPIARY) {
-            // Only allow retrieval of excess sAPIARY beyond what's owed to warmup users
+            // Only allow retrieval of excess sAPIARY
             uint256 sApiaryBalance = IERC20(sAPIARY).balanceOf(address(this));
             // In normal operation, staking contract shouldn't hold sAPIARY
-            // It sends to warmup contract immediately
+            // It sends directly to stakers immediately
             // Allow retrieval only if there's unexpected balance
             require(sApiaryBalance >= amount, "ApiaryStaking: insufficient balance");
         }

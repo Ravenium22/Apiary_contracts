@@ -281,9 +281,9 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         // Phase 1 default configuration (25/25/50)
         currentStrategy = Strategy.PHASE1_LP_BURN;
         splitConfig = SplitConfig({
-            toHoney: 2500, // 25%
-            toApiaryLP: 5000, // 50% (split between APIARY and HONEY for LP)
-            toBurn: 2500, // 25%
+            toHoney: 2500, // 25% - swap to HONEY (will be paired with APIARY for LP)
+            toApiaryLP: 2500, // 25% - swap to APIARY (will be paired with HONEY for LP)
+            toBurn: 5000, // 50% - swap to APIARY and burn
             toStakers: 0, // Not used in Phase 1
             toCompound: 0 // Not used in Phase 1
         });
