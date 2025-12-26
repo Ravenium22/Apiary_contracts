@@ -24,7 +24,6 @@ import "../../src/ApiaryUniswapV2TwapOracle.sol";
  *   - HONEY_ADDRESS: Address of HONEY stablecoin
  *   - APIARY_HONEY_LP: Address of APIARY/HONEY LP token
  *   - TREASURY_ADDRESS: Address of treasury contract
- *   - DAO_ADDRESS: Address of DAO (receives bond fees)
  *   - DEPLOYER_ADDRESS: Admin address
  *   - MERKLE_ROOT: Initial merkle root for pre-sale whitelist
  */
@@ -44,37 +43,33 @@ contract DeployBonds is Script {
         address honey = vm.envAddress("HONEY_ADDRESS");
         address apiaryHoneyLP = vm.envAddress("APIARY_HONEY_LP");
         address treasury = vm.envAddress("TREASURY_ADDRESS");
-        address dao = vm.envAddress("DAO_ADDRESS");
         address admin = vm.envAddress("DEPLOYER_ADDRESS");
         bytes32 merkleRoot = vm.envBytes32("MERKLE_ROOT");
         
         console.log("=== Deploying Bond Contracts ===");
         console.log("APIARY:", apiary);
         console.log("Treasury:", treasury);
-        console.log("DAO:", dao);
         console.log("Admin:", admin);
         console.log("Chain ID:", block.chainid);
         
         vm.startBroadcast();
         
         // Deploy TWAP Oracle first (required by bond depositories)
+        // Constructor only takes the LP pair address
         ApiaryUniswapV2TwapOracle twapOracle = new ApiaryUniswapV2TwapOracle(
-            apiaryHoneyLP,
-            apiary,
-            honey
+            apiaryHoneyLP
         );
         
         console.log("\n1. TWAP Oracle deployed:", address(twapOracle));
         
         // Deploy iBGT Bond Depository
-        // No bond calculator needed for single-asset bonds
+        // Constructor: (apiary, principle, treasury, admin, bondCalculator, twap)
         ApiaryBondDepository ibgtBond = new ApiaryBondDepository(
-            apiary,           // APIARY token
-            ibgt,             // Principle (iBGT)
-            treasury,         // Treasury
-            dao,              // DAO
-            admin,            // Admin
-            address(0),       // No bond calculator (not LP)
+            apiary,             // APIARY token
+            ibgt,               // Principle (iBGT)
+            treasury,           // Treasury
+            admin,              // Admin/Owner
+            address(0),         // No bond calculator (not LP)
             address(twapOracle) // TWAP oracle
         );
         
@@ -82,14 +77,12 @@ contract DeployBonds is Script {
         
         // Deploy LP Bond Depository
         // Note: Bond calculator contract would need to be deployed separately
-        // For now, using address(0) - update in configuration if needed
         ApiaryBondDepository lpBond = new ApiaryBondDepository(
-            apiary,           // APIARY token
-            apiaryHoneyLP,    // Principle (LP token)
-            treasury,         // Treasury
-            dao,              // DAO
-            admin,            // Admin
-            address(0),       // Bond calculator (deploy separately if needed)
+            apiary,             // APIARY token
+            apiaryHoneyLP,      // Principle (LP token)
+            treasury,           // Treasury
+            admin,              // Admin/Owner
+            address(0),         // Bond calculator (deploy separately if needed)
             address(twapOracle) // TWAP oracle
         );
         
@@ -117,7 +110,6 @@ contract DeployBonds is Script {
         require(ibgtBond.APIARY() == apiary, "iBGT Bond: APIARY not set");
         require(ibgtBond.principle() == ibgt, "iBGT Bond: Principle not iBGT");
         require(ibgtBond.treasury() == treasury, "iBGT Bond: Treasury not set");
-        require(ibgtBond.dao() == dao, "iBGT Bond: DAO not set");
         require(ibgtBond.owner() == admin, "iBGT Bond: Owner not set");
         require(!ibgtBond.isLiquidityBond(), "iBGT Bond: Should not be liquidity bond");
         
@@ -125,7 +117,6 @@ contract DeployBonds is Script {
         require(lpBond.APIARY() == apiary, "LP Bond: APIARY not set");
         require(lpBond.principle() == apiaryHoneyLP, "LP Bond: Principle not LP");
         require(lpBond.treasury() == treasury, "LP Bond: Treasury not set");
-        require(lpBond.dao() == dao, "LP Bond: DAO not set");
         require(lpBond.owner() == admin, "LP Bond: Owner not set");
         
         // Sanity checks - Pre-Sale

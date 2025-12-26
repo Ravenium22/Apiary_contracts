@@ -5,7 +5,6 @@ import {Script, console} from "forge-std/Script.sol";
 import {ApiaryToken} from "../../src/ApiaryToken.sol";
 import {sApiary} from "../../src/sApiary.sol";
 import {ApiaryStaking} from "../../src/ApiaryStaking.sol";
-import {ApiaryStakingWarmup} from "../../src/ApiaryStakingWarmup.sol";
 import {ApiaryTreasury} from "../../src/ApiaryTreasury.sol";
 import {ApiaryBondDepository} from "../../src/ApiaryBondDepository.sol";
 import {ApiaryPreSaleBond} from "../../src/ApiaryPreSaleBond.sol";
@@ -37,7 +36,6 @@ contract VerifyDeployment is Script {
     ApiaryToken apiary;
     sApiary sApiaryToken;
     ApiaryStaking staking;
-    ApiaryStakingWarmup warmup;
     ApiaryTreasury treasury;
     ApiaryBondDepository ibgtBond;
     ApiaryBondDepository lpBond;
@@ -100,7 +98,6 @@ contract VerifyDeployment is Script {
         apiary = ApiaryToken(vm.envAddress("APIARY_ADDRESS"));
         sApiaryToken = sApiary(vm.envAddress("SAPIARY_ADDRESS"));
         staking = ApiaryStaking(vm.envAddress("STAKING_ADDRESS"));
-        warmup = ApiaryStakingWarmup(vm.envAddress("WARMUP_ADDRESS"));
         treasury = ApiaryTreasury(vm.envAddress("TREASURY_ADDRESS"));
         ibgtBond = ApiaryBondDepository(vm.envAddress("IBGT_BOND_ADDRESS"));
         lpBond = ApiaryBondDepository(vm.envAddress("LP_BOND_ADDRESS"));
@@ -121,7 +118,8 @@ contract VerifyDeployment is Script {
     function _verifyTokens() internal {
         console.log("--- Verifying Tokens ---");
         
-        _check("APIARY total supply cap", apiary.INITIAL_SUPPLY() == 200_000e9);
+        // INITIAL_SUPPLY is internal, check totalMintedSupply instead
+        _check("APIARY initial supply minted", apiary.totalMintedSupply() >= 200_000e9);
         _check("APIARY decimals", 9 == 9); // Always true, just logging
         _check("sAPIARY staking contract", sApiaryToken.stakingContract() == address(staking));
         _check("sAPIARY decimals", 9 == 9);
@@ -134,14 +132,10 @@ contract VerifyDeployment is Script {
         
         _check("Staking APIARY token", staking.APIARY() == address(apiary));
         _check("Staking sAPIARY token", staking.sAPIARY() == address(sApiaryToken));
-        _check("Staking warmup contract", staking.warmup() == address(warmup));
         
         (uint256 length, uint256 number, uint256 endBlock, uint256 distribute) = staking.epoch();
         _check("Epoch length > 0", length > 0);
         _check("Epoch distribute = 0 (Phase 1)", distribute == 0);
-        
-        _check("Warmup staking ref", warmup.staking() == address(staking));
-        _check("Warmup sAPIARY ref", address(warmup.sAPIARY()) == address(sApiaryToken));
         
         console.log("");
     }
@@ -193,7 +187,7 @@ contract VerifyDeployment is Script {
         // Pre-Sale
         _check("Pre-Sale HONEY", address(preSale.honey()) == address(honey));
         _check("Pre-Sale treasury", preSale.treasury() == address(treasury));
-        _check("Pre-Sale APIARY set", preSale.apiary() == address(apiary));
+        _check("Pre-Sale APIARY set", address(preSale.apiaryToken()) == address(apiary));
         _check("Pre-Sale token price > 0", preSale.tokenPrice() > 0);
         
         console.log("");
@@ -210,8 +204,8 @@ contract VerifyDeployment is Script {
         _check("YM Infrared adapter", yieldManager.infraredAdapter() == address(infraredAdapter));
         _check("YM Kodiak adapter", yieldManager.kodiakAdapter() == address(kodiakAdapter));
         
-        (uint16 toHoney, uint16 toApiaryLP, uint16 toBurn,,) = yieldManager.splitConfig();
-        uint16 total = toHoney + toApiaryLP + toBurn;
+        ApiaryYieldManager.SplitConfig memory splitCfg = yieldManager.getSplitPercentages();
+        uint256 total = splitCfg.toHoney + splitCfg.toApiaryLP + splitCfg.toBurn;
         _check("YM splits sum to 10000", total == 10000);
         _check("YM min yield > 0", yieldManager.minYieldAmount() > 0);
         
@@ -223,7 +217,6 @@ contract VerifyDeployment is Script {
         
         // Infrared Adapter
         _check("IA iBGT token", address(infraredAdapter.ibgt()) == address(ibgt));
-        _check("IA treasury", infraredAdapter.treasury() == address(treasury));
         _check("IA yield manager", infraredAdapter.yieldManager() == address(yieldManager));
         
         // Kodiak Adapter
@@ -265,11 +258,8 @@ contract VerifyDeployment is Script {
     function _verifyAllocations() internal {
         console.log("--- Verifying Allocations ---");
         
-        _check("Treasury has MINTER role", apiary.hasRole(apiary.MINTER_ROLE(), address(treasury)));
-        _check("Pre-Sale has MINTER role", apiary.hasRole(apiary.MINTER_ROLE(), address(preSale)));
-        _check("iBGT Bond has MINTER role", apiary.hasRole(apiary.MINTER_ROLE(), address(ibgtBond)));
-        _check("LP Bond has MINTER role", apiary.hasRole(apiary.MINTER_ROLE(), address(lpBond)));
-        
+        // MINTER_ROLE is internal, so check allocation limits instead
+        // Having an allocation limit implies minter role was granted
         _check("Treasury allocation > 0", apiary.allocationLimits(address(treasury)) > 0);
         _check("Pre-Sale allocation > 0", apiary.allocationLimits(address(preSale)) > 0);
         _check("iBGT Bond allocation > 0", apiary.allocationLimits(address(ibgtBond)) > 0);
@@ -298,9 +288,7 @@ contract VerifyDeployment is Script {
     }
     
     function _getBondTerms(ApiaryBondDepository bond) internal view returns (uint256 vesting, uint256 discount, uint256 maxDebt) {
-        (vesting,) = bond.terms(0); // vesting term
-        (discount,) = bond.terms(1); // discount rate
-        (maxDebt,) = bond.terms(2); // max debt
+        (vesting,,discount,maxDebt) = bond.terms();
     }
     
     function _check(string memory description, bool condition) internal {

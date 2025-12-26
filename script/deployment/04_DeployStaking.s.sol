@@ -3,11 +3,10 @@ pragma solidity 0.8.26;
 
 import "forge-std/Script.sol";
 import "../../src/ApiaryStaking.sol";
-import "../../src/ApiaryStakingWarmup.sol";
 
 /**
  * @title DeployStaking
- * @notice Deployment script for Apiary Staking and Warmup contracts
+ * @notice Deployment script for Apiary Staking contract
  * @dev Step 4 of Apiary protocol deployment
  * 
  * Usage:
@@ -27,7 +26,7 @@ import "../../src/ApiaryStakingWarmup.sol";
  */
 contract DeployStaking is Script {
     
-    function run() external returns (address staking, address warmup) {
+    function run() external returns (address staking) {
         // Load environment variables
         address apiary = vm.envAddress("APIARY_ADDRESS");
         address sApiaryAddr = vm.envAddress("SAPIARY_ADDRESS");
@@ -58,18 +57,10 @@ contract DeployStaking is Script {
             protocolAdmin
         );
         
-        // Deploy Warmup contract
-        // Constructor: ApiaryStakingWarmup(address _staking, address _sAPIARY)
-        ApiaryStakingWarmup warmupContract = new ApiaryStakingWarmup(
-            address(stakingContract),
-            sApiaryAddr
-        );
-        
         vm.stopBroadcast();
         
-        console.log("\n=== Staking Contracts Deployed ===");
+        console.log("\n=== Staking Contract Deployed ===");
         console.log("Staking:", address(stakingContract));
-        console.log("Warmup:", address(warmupContract));
         console.log("Owner:", stakingContract.owner());
         
         // Get epoch info
@@ -90,18 +81,13 @@ contract DeployStaking is Script {
         require(endBlock == firstEpochBlock, "First epoch block incorrect");
         require(distribute == 0, "Distribute should be 0 for Phase 1");
         
-        require(warmupContract.staking() == address(stakingContract), "Warmup staking not set");
-        require(address(warmupContract.sAPIARY()) == sApiaryAddr, "Warmup sAPIARY not set");
-        
         console.log(unicode"\n✓ Staking deployment successful!");
         console.log(unicode"✓ Owner verified");
         console.log(unicode"✓ Epoch configuration verified");
-        console.log(unicode"✓ Warmup contract verified");
         console.log(unicode"\n⚠ Next steps:");
         console.log("  1. Initialize sAPIARY with staking contract address");
-        console.log("  2. Set warmup contract in staking");
-        console.log("  3. Set locker contract in staking (if using lockup)");
+        console.log("  2. Set locker contract in staking (if using lockup)");
         
-        return (address(stakingContract), address(warmupContract));
+        return address(stakingContract);
     }
 }

@@ -6,20 +6,91 @@ import { ApiaryYieldManager } from "../src/ApiaryYieldManager.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
+ * @title MockInfraredAdapterForYM
+ * @notice Mock Infrared adapter for YieldManager testing
+ */
+contract MockInfraredAdapterForYM {
+    uint256 public pendingRewardsValue;
+    uint256 public totalStaked;
+    uint256 public totalRewardsClaimed;
+    
+    function setPendingRewards(uint256 value) external {
+        pendingRewardsValue = value;
+    }
+    
+    function pendingRewards() external view returns (uint256) {
+        return pendingRewardsValue;
+    }
+    
+    function getStakedBalance() external view returns (uint256) {
+        return totalStaked;
+    }
+    
+    function stake(uint256 amount) external returns (uint256) {
+        totalStaked += amount;
+        return amount;
+    }
+    
+    function unstake(uint256 amount) external returns (uint256) {
+        totalStaked -= amount;
+        return amount;
+    }
+    
+    function claimRewards() external returns (uint256) {
+        uint256 rewards = pendingRewardsValue;
+        pendingRewardsValue = 0;
+        totalRewardsClaimed += rewards;
+        return rewards;
+    }
+}
+
+/**
+ * @title MockKodiakAdapterForYM
+ * @notice Mock Kodiak adapter for YieldManager testing
+ */
+contract MockKodiakAdapterForYM {
+    uint256 public pendingRewardsValue;
+    
+    function setPendingRewards(uint256 value) external {
+        pendingRewardsValue = value;
+    }
+    
+    function pendingRewards() external view returns (uint256) {
+        return pendingRewardsValue;
+    }
+    
+    function swap(address, address, uint256 amountIn, uint256) external returns (uint256) {
+        return amountIn; // 1:1 for testing
+    }
+    
+    function addLiquidity(address, address, uint256 amountA, uint256 amountB, uint256, uint256)
+        external
+        returns (uint256 actualA, uint256 actualB, uint256 liquidity)
+    {
+        return (amountA, amountB, amountA + amountB);
+    }
+    
+    function claimRewards(address) external returns (address[] memory tokens, uint256[] memory amounts) {
+        tokens = new address[](0);
+        amounts = new uint256[](0);
+    }
+}
+
+/**
  * @title ApiaryYieldManagerTest
  * @notice Comprehensive test suite for yield manager
  * @dev Tests all strategies, edge cases, and security scenarios
  */
 contract ApiaryYieldManagerTest is Test {
     ApiaryYieldManager public yieldManager;
+    MockInfraredAdapterForYM public mockInfraredAdapter;
+    MockKodiakAdapterForYM public mockKodiakAdapter;
 
     // Mock addresses (replace with actual deployments)
     address public constant APIARY_TOKEN = address(0x1);
     address public constant HONEY_TOKEN = address(0x2);
     address public constant IBGT_TOKEN = address(0x3);
     address public constant TREASURY = address(0x4);
-    address public constant INFRARED_ADAPTER = address(0x5);
-    address public constant KODIAK_ADAPTER = address(0x6);
     address public constant OWNER = address(0x7);
 
     // Test accounts
@@ -27,16 +98,20 @@ contract ApiaryYieldManagerTest is Test {
     address public attacker = makeAddr("attacker");
 
     function setUp() public {
+        // Deploy mock adapters
+        mockInfraredAdapter = new MockInfraredAdapterForYM();
+        mockKodiakAdapter = new MockKodiakAdapterForYM();
+        
         vm.startPrank(OWNER);
 
-        // Deploy yield manager
+        // Deploy yield manager with mock adapters
         yieldManager = new ApiaryYieldManager(
             APIARY_TOKEN,
             HONEY_TOKEN,
             IBGT_TOKEN,
             TREASURY,
-            INFRARED_ADAPTER,
-            KODIAK_ADAPTER,
+            address(mockInfraredAdapter),
+            address(mockKodiakAdapter),
             OWNER
         );
 
@@ -55,18 +130,18 @@ contract ApiaryYieldManagerTest is Test {
 
         // Verify state variables
         assertEq(yieldManager.treasury(), TREASURY);
-        assertEq(yieldManager.infraredAdapter(), INFRARED_ADAPTER);
-        assertEq(yieldManager.kodiakAdapter(), KODIAK_ADAPTER);
+        assertEq(yieldManager.infraredAdapter(), address(mockInfraredAdapter));
+        assertEq(yieldManager.kodiakAdapter(), address(mockKodiakAdapter));
         assertEq(yieldManager.owner(), OWNER);
 
         // Verify default strategy
         assertEq(uint256(yieldManager.currentStrategy()), uint256(ApiaryYieldManager.Strategy.PHASE1_LP_BURN));
 
-        // Verify default split config
+        // Verify default split config (25% HONEY, 25% APIARY LP, 50% burn)
         ApiaryYieldManager.SplitConfig memory config = yieldManager.getSplitPercentages();
-        assertEq(config.toHoney, 2500);
-        assertEq(config.toApiaryLP, 5000);
-        assertEq(config.toBurn, 2500);
+        assertEq(config.toHoney, 2500);      // 25%
+        assertEq(config.toApiaryLP, 2500);   // 25%
+        assertEq(config.toBurn, 5000);       // 50%
         assertEq(config.toStakers, 0);
         assertEq(config.toCompound, 0);
 
@@ -83,8 +158,8 @@ contract ApiaryYieldManagerTest is Test {
             HONEY_TOKEN,
             IBGT_TOKEN,
             TREASURY,
-            INFRARED_ADAPTER,
-            KODIAK_ADAPTER,
+            address(mockInfraredAdapter),
+            address(mockKodiakAdapter),
             OWNER
         );
     }
@@ -191,11 +266,12 @@ contract ApiaryYieldManagerTest is Test {
 
     function test_SetInfraredAdapter() public {
         address newAdapter = makeAddr("newInfrared");
+        address oldAdapter = address(mockInfraredAdapter);
 
         vm.startPrank(OWNER);
 
         vm.expectEmit(true, true, true, false);
-        emit ApiaryYieldManager.AdapterUpdated("infrared", INFRARED_ADAPTER, newAdapter);
+        emit ApiaryYieldManager.AdapterUpdated("infrared", oldAdapter, newAdapter);
 
         yieldManager.setInfraredAdapter(newAdapter);
 
@@ -215,11 +291,12 @@ contract ApiaryYieldManagerTest is Test {
 
     function test_SetKodiakAdapter() public {
         address newAdapter = makeAddr("newKodiak");
+        address oldAdapter = address(mockKodiakAdapter);
 
         vm.startPrank(OWNER);
 
         vm.expectEmit(true, true, true, false);
-        emit ApiaryYieldManager.AdapterUpdated("kodiak", KODIAK_ADAPTER, newAdapter);
+        emit ApiaryYieldManager.AdapterUpdated("kodiak", oldAdapter, newAdapter);
 
         yieldManager.setKodiakAdapter(newAdapter);
 
@@ -333,9 +410,9 @@ contract ApiaryYieldManagerTest is Test {
     function test_GetSplitPercentages() public view {
         ApiaryYieldManager.SplitConfig memory config = yieldManager.getSplitPercentages();
 
-        assertEq(config.toHoney, 2500);
-        assertEq(config.toApiaryLP, 5000);
-        assertEq(config.toBurn, 2500);
+        assertEq(config.toHoney, 2500);      // 25%
+        assertEq(config.toApiaryLP, 2500);   // 25%
+        assertEq(config.toBurn, 5000);       // 50%
         assertEq(config.toStakers, 0);
         assertEq(config.toCompound, 0);
     }
@@ -400,21 +477,36 @@ contract ApiaryYieldManagerTest is Test {
     // Note: Full integration tests require mock adapters
     // See separate integration test file for end-to-end scenarios
 
-    function test_PendingYieldCallsAdapter() public view {
-        // This will call infraredAdapter.pendingRewards()
-        // In production, mock adapter should return value
+    function test_PendingYieldCallsAdapter() public {
+        // Initially no pending rewards
+        uint256 pendingInitial = yieldManager.pendingYield();
+        assertEq(pendingInitial, 0);
+        
+        // Set pending rewards in mock adapter
+        mockInfraredAdapter.setPendingRewards(500e18);
+        
+        // Verify pendingYield returns the mock value
         uint256 pending = yieldManager.pendingYield();
-
-        // With mock adapter returning 0
-        assertEq(pending, 0);
+        assertEq(pending, 500e18);
     }
 
-    function test_CanExecuteYield() public view {
+    function test_CanExecuteYield() public {
+        // Initially false (no pending yield above minimum)
+        (bool canExecuteInitial, uint256 pendingInitial, ) = yieldManager.canExecuteYield();
+        assertEq(canExecuteInitial, false);
+        assertEq(pendingInitial, 0);
+        
+        // Set pending rewards above minimum (default minYieldAmount is 0.1e18)
+        mockInfraredAdapter.setPendingRewards(1e18);
+        
+        // Warp time past MIN_EXECUTION_INTERVAL (1 hour) to satisfy time constraint
+        // Since lastExecutionTime starts at 0, we need to be past 1 hour from timestamp 0
+        vm.warp(2 hours);
+        
+        // Now should be able to execute
         (bool canExecute, uint256 pending, ) = yieldManager.canExecuteYield();
-
-        // Initially false (no pending yield)
-        assertEq(canExecute, false);
-        assertEq(pending, 0);
+        assertEq(canExecute, true);
+        assertEq(pending, 1e18);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -476,6 +568,13 @@ contract ApiaryYieldManagerTest is Test {
         uint256 toStakers,
         uint256 toCompound
     ) public {
+        // Bound inputs to prevent overflow (max 10000 each, which is 100%)
+        toHoney = bound(toHoney, 0, 10000);
+        toApiaryLP = bound(toApiaryLP, 0, 10000);
+        toBurn = bound(toBurn, 0, 10000);
+        toStakers = bound(toStakers, 0, 10000);
+        toCompound = bound(toCompound, 0, 10000);
+        
         vm.startPrank(OWNER);
 
         uint256 total = toHoney + toApiaryLP + toBurn + toStakers + toCompound;

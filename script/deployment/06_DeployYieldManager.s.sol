@@ -97,10 +97,10 @@ contract DeployYieldManager is Script {
         console.log("\n1. Yield Manager deployed:", address(yieldManager));
         
         // Step 2: Deploy Infrared Adapter with correct yield manager
+        // Constructor: (infrared, ibgt, yieldManager, admin)
         ApiaryInfraredAdapter infraredAdapter = new ApiaryInfraredAdapter(
             infraredStaking,
             ibgt,
-            treasury,
             address(yieldManager),
             admin
         );
@@ -130,10 +130,10 @@ contract DeployYieldManager is Script {
         // Display default configurations
         console.log("\nYield Manager Configuration:");
         console.log("  Strategy:", uint8(yieldManager.currentStrategy())); // 0 = PHASE1_LP_BURN
-        (uint16 toHoney, uint16 toApiaryLP, uint16 toBurn, uint16 toStakers, uint16 toCompound) = yieldManager.splitConfig();
-        console.log("  Split - To HONEY:", toHoney, "bps (25%)");
-        console.log("  Split - To APIARY LP:", toApiaryLP, "bps (50%)");
-        console.log("  Split - To Burn:", toBurn, "bps (25%)");
+        ApiaryYieldManager.SplitConfig memory split = yieldManager.getSplitPercentages();
+        console.log("  Split - To HONEY:", split.toHoney, "bps (25%)");
+        console.log("  Split - To APIARY LP:", split.toApiaryLP, "bps (25%)");
+        console.log("  Split - To Burn:", split.toBurn, "bps (50%)");
         console.log("  Slippage Tolerance:", yieldManager.slippageTolerance(), "bps");
         console.log("  Min Yield:", yieldManager.minYieldAmount() / 1e18, "iBGT");
         console.log("  Max Execution:", yieldManager.maxExecutionAmount() / 1e18, "iBGT");
@@ -157,7 +157,6 @@ contract DeployYieldManager is Script {
         require(yieldManager.owner() == admin, "YM: Owner not set");
         
         require(address(infraredAdapter.ibgt()) == ibgt, "IA: iBGT not set");
-        require(infraredAdapter.treasury() == treasury, "IA: Treasury not set");
         require(infraredAdapter.yieldManager() == address(yieldManager), "IA: YM not set");
         require(infraredAdapter.owner() == admin, "IA: Owner not set");
         
