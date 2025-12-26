@@ -1,3 +1,7 @@
+# =============================================================================
+# APIARY PROTOCOL - GITIGNORE
+# =============================================================================
+
 # Compiler files
 cache/
 out/
@@ -10,10 +14,28 @@ out/
 # Docs
 docs/
 
-# Dotenv file
+# Environment files - NEVER commit these!
 .env
+.env.local
+.env.*.local
+*.env
 
-node_modules
+# Node
+node_modules/
+package-lock.json
 
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Test artifacts
 MerkleTreePreSaleBondWhitelistAddressesTest.txt
 MerkleTreePreSaleOwners.txt
+lcov.info
+coverage/
+
+# Sensitive deployment data
+/cache/**/run-latest.json
