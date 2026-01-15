@@ -74,6 +74,8 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     event Rebased(uint256 indexed epoch, uint256 distribute);
     event DistributorSet(address indexed distributor);
     event LockerSet(address indexed locker);
+    /// @notice L-02 Fix: Emitted when totalStaked changes
+    event TotalStakedUpdated(uint256 oldValue, uint256 newValue);
 
     /*//////////////////////////////////////////////////////////////
                         ERRORS
@@ -83,6 +85,8 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__ONLY_LOCKER();
     error APIARY__LOCKER_ALREADY_SET();
     error APIARY__TRANSFER_FAILED();
+    /// @notice M-02 Fix: Insufficient sAPIARY balance for staking
+    error APIARY__INSUFFICIENT_SAPIARY_BALANCE();
 
     /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
@@ -140,12 +144,22 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
         rebase();
 
         // Update the last staked time on the APIARY token contract
-        IApiaryToken(APIARY).updateLastStakedTime(_recipient);
+        // H-06 Fix: Use try-catch to prevent staking failure if timestamp update reverts
+        try IApiaryToken(APIARY).updateLastStakedTime(_recipient) {} catch {}
 
         // Transfer APIARY from user to this contract
         IERC20(APIARY).safeTransferFrom(msg.sender, address(this), _amount);
 
+        // L-02 Fix: Emit event for totalStaked change
+        uint256 oldTotalStaked = totalStaked;
         totalStaked = totalStaked.add(_amount);
+        emit TotalStakedUpdated(oldTotalStaked, totalStaked);
+
+        // M-02 Fix: Verify sufficient sAPIARY balance before transfer
+        uint256 sApiaryBalance = IERC20(sAPIARY).balanceOf(address(this));
+        if (sApiaryBalance < _amount) {
+            revert APIARY__INSUFFICIENT_SAPIARY_BALANCE();
+        }
 
         // Transfer sAPIARY directly to recipient (1:1 with APIARY)
         IERC20(sAPIARY).safeTransfer(_recipient, _amount);
@@ -168,7 +182,10 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
             rebase();
         }
 
+        // L-02 Fix: Emit event for totalStaked change
+        uint256 oldTotalStaked = totalStaked;
         totalStaked = totalStaked.sub(_amount);
+        emit TotalStakedUpdated(oldTotalStaked, totalStaked);
 
         // Take sAPIARY from user
         IERC20(sAPIARY).safeTransferFrom(msg.sender, address(this), _amount);
@@ -189,7 +206,10 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
 
         rebase();
 
+        // L-02 Fix: Emit event for totalStaked change
+        uint256 oldTotalStaked = totalStaked;
         totalStaked = totalStaked.sub(_amount);
+        emit TotalStakedUpdated(oldTotalStaked, totalStaked);
 
         IERC20(sAPIARY).safeTransferFrom(_recipient, address(this), _amount);
         IERC20(APIARY).safeTransfer(_recipient, _amount);

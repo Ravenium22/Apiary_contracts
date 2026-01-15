@@ -598,6 +598,13 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
             revert APIARY__LOCK_DURATION_NOT_SET();
         }
 
+        // H-07 Fix: Validate lock duration meets farm's minimum requirement
+        IKodiakFarm farmContract = IKodiakFarm(farm);
+        uint256 minLockTime = farmContract.lock_time_min();
+        if (lockDuration < minLockTime) {
+            revert APIARY__LOCK_DURATION_TOO_SHORT();
+        }
+
         // Transfer LP tokens from sender
         IERC20(lpToken).safeTransferFrom(msg.sender, address(this), amount);
 
@@ -605,7 +612,6 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
         _approveTokenIfNeeded(lpToken, farm, amount);
 
         // Get stake count before to identify new stake
-        IKodiakFarm farmContract = IKodiakFarm(farm);
         uint256 stakeCountBefore = farmContract.lockedStakesOf(address(this)).length;
 
         // Stake with configured lock duration

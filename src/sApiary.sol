@@ -250,6 +250,13 @@ contract sApiary is ERC20Permit, Ownable2Step {
      * @param epoch_ The epoch number.
      */
     function _storeRebase(uint256 previousCirculating_, uint256 profit_, uint256 epoch_) internal returns (bool) {
+        // H-02 Fix: Prevent division by zero if no circulating supply
+        if (previousCirculating_ == 0) {
+            emit LogSupply(epoch_, block.timestamp, _totalSupply);
+            emit LogRebase(epoch_, 0, index());
+            return true;
+        }
+        
         uint256 rebasePercent = profit_.mul(1e18).div(previousCirculating_);
 
         rebases.push(
@@ -331,9 +338,10 @@ contract sApiary is ERC20Permit, Ownable2Step {
      * @param value The amount of tokens to transfer.
      */
     function transfer(address to, uint256 value) public override returns (bool) {
-        require(_gonBalances[msg.sender].div(_gonsPerFragment) >= value, "sApiary: insufficient balance");
-
+        // H-03 Fix: Calculate gons first to avoid rounding mismatch between check and transfer
         uint256 gonValue = gonsForBalance(value);
+        require(_gonBalances[msg.sender] >= gonValue, "sApiary: insufficient balance");
+
         _gonBalances[msg.sender] = _gonBalances[msg.sender].sub(gonValue);
         _gonBalances[to] = _gonBalances[to].add(gonValue);
         
@@ -348,12 +356,13 @@ contract sApiary is ERC20Permit, Ownable2Step {
      * @param value The amount of tokens to transfer.
      */
     function transferFrom(address from, address to, uint256 value) public override returns (bool) {
-        require(_gonBalances[from].div(_gonsPerFragment) >= value, "sApiary: insufficient balance");
+        // H-03 Fix: Calculate gons first to avoid rounding mismatch between check and transfer
+        uint256 gonValue = gonsForBalance(value);
+        require(_gonBalances[from] >= gonValue, "sApiary: insufficient balance");
 
         _allowedValue[from][msg.sender] = _allowedValue[from][msg.sender].sub(value);
         emit Approval(from, msg.sender, _allowedValue[from][msg.sender]);
 
-        uint256 gonValue = gonsForBalance(value);
         _gonBalances[from] = _gonBalances[from].sub(gonValue);
         _gonBalances[to] = _gonBalances[to].add(gonValue);
         

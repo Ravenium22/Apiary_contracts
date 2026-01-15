@@ -131,6 +131,7 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
     error APIARY__INVALID_STATE_TRANSITION();
     error APIARY__TGE_NOT_STARTED();
     error APIARY__SLIPPAGE_EXCEEDED();
+    error APIARY__TOKEN_NOT_SET();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -318,6 +319,11 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
      * - Otherwise: (totalAmount × timeSinceTGE) / vestingDuration
      */
     function unlockApiary() public whenNotPaused nonReentrant {
+        // C-03 Fix: Ensure apiaryToken is set before attempting transfer
+        if (address(apiaryToken) == address(0)) {
+            revert APIARY__TOKEN_NOT_SET();
+        }
+        
         InvestorBondInfo storage investorInfo = _investorAllocations[msg.sender];
 
         if (investorInfo.totalAmount == 0) {
@@ -493,6 +499,15 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
         }
 
         if (token != address(0)) {
+            // C-05 Fix: Protect user's vested APIARY tokens from being withdrawn
+            if (token == address(apiaryToken) && address(apiaryToken) != address(0)) {
+                uint256 userAllocated = totalBondsSold;
+                uint256 contractBalance = IERC20(token).balanceOf(address(this));
+                uint256 excess = contractBalance > userAllocated ? contractBalance - userAllocated : 0;
+                if (amount > excess) {
+                    revert APIARY__INVALID_AMOUNT();
+                }
+            }
             IERC20(token).safeTransfer(msg.sender, amount);
         }
     }

@@ -92,6 +92,12 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     uint256 public constant MINIMUM_PAYOUT = 10_000_000; // 0.01 APIARY minimum
     uint256 private constant PRECISION = 1e18;
     
+    // C-02 Fix: Maximum bonds per user to prevent DoS in redeemAll()
+    uint256 public constant MAX_BONDS_PER_USER = 50;
+    
+    // M-09 Fix: Maximum discount rate (50% = 5000 bps)
+    uint256 public constant MAX_DISCOUNT_RATE = 5000;
+    
     // Berachain average block time: ~5 seconds
     // 5 days = 5 * 24 * 60 * 60 / 5 = 86,400 blocks
     uint256 public constant DEFAULT_VESTING_TERM = 86_400;
@@ -120,6 +126,18 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     
     /// @notice TWAP oracle for pricing
     IApiaryUniswapV2TwapOracle public twap;
+    
+    /// @notice L-03 Fix: Blocks per day for vesting calculations (adjustable if block time changes)
+    uint256 public blocksPerDay;
+
+    /// @notice M-NEW-02 Fix: Reference price for deviation check (last known good price)
+    uint256 public referencePrice;
+    
+    /// @notice M-NEW-02 Fix: Maximum allowed price deviation in basis points (default 2000 = 20%)
+    uint256 public maxPriceDeviation;
+    
+    /// @notice M-NEW-02 Fix: Timestamp of last reference price update
+    uint256 public referencePriceLastUpdate;
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -140,6 +158,11 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__INVALID_BOND_INDEX();
     error APIARY__BOND_ALREADY_REDEEMED();
     error APIARY__NOTHING_TO_REDEEM();
+    error APIARY__MAX_BONDS_EXCEEDED();
+    /// @notice M-NEW-02 Fix: Price deviation too high
+    error APIARY__PRICE_DEVIATION_TOO_HIGH();
+    /// @notice M-NEW-02 Fix: Invalid price deviation parameter
+    error APIARY__INVALID_PRICE_DEVIATION();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -168,6 +191,12 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 payoutRedeemed,
         uint256 payoutRemaining
     );
+    /// @notice L-03 Fix: Emitted when blocksPerDay is updated
+    event BlocksPerDayUpdated(uint256 oldValue, uint256 newValue);
+    /// @notice M-NEW-02 Fix: Emitted when reference price is updated
+    event ReferencePriceUpdated(uint256 oldPrice, uint256 newPrice);
+    /// @notice M-NEW-02 Fix: Emitted when max price deviation is updated
+    event MaxPriceDeviationUpdated(uint256 oldDeviation, uint256 newDeviation);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -205,6 +234,12 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         twap = IApiaryUniswapV2TwapOracle(_twap);
         bondCalculator = _bondCalculator;
         isLiquidityBond = (_bondCalculator != address(0));
+        
+        // L-03 Fix: Initialize blocksPerDay (86400 seconds / 5 seconds per block = 17280)
+        blocksPerDay = 17_280;
+        
+        // M-NEW-02 Fix: Initialize price deviation protection (20% max deviation)
+        maxPriceDeviation = 2000; // 20% in basis points
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -257,12 +292,18 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
 
         // Approve and deposit to treasury
         // Treasury mints `payOut` APIARY to this contract (bond depository)
-        IERC20(principle).approve(treasury, amount);
+        // C-06 Fix: Use forceApprove for tokens that require zero allowance first
+        IERC20(principle).forceApprove(treasury, amount);
         IApiaryTreasury(treasury).deposit(amount, principle, payOut);
 
         // Update total debt
         totalDebt += payOut;
         payout = payOut;
+
+        // C-02 Fix: Check user hasn't exceeded max bonds before creating new one
+        if (userBonds[msg.sender].length >= MAX_BONDS_PER_USER) {
+            revert APIARY__MAX_BONDS_EXCEEDED();
+        }
 
         // Create new bond for user (push to array)
         uint256 bondIndex = userBonds[msg.sender].length;
@@ -384,7 +425,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         if (terms.vestingTerm != 0) revert APIARY__ALREADY_INITIALIZED();
         if (_vestingTerm < MINIMUM_VESTING_TERM) revert APIARY__INVALID_VESTING_TERM();
         if (_maxPayout > 1000) revert APIARY__INVALID_MAX_PAYOUT(); // Max 1%
-        if (_discountRate > BPS) revert APIARY__INVALID_DISCOUNT_RATE();
+        // M-09 Fix: Limit discount rate to 50% max
+        if (_discountRate > MAX_DISCOUNT_RATE) revert APIARY__INVALID_DISCOUNT_RATE();
 
         terms = Terms({
             vestingTerm: _vestingTerm,
@@ -409,7 +451,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
             if (_input > 1000) revert APIARY__INVALID_MAX_PAYOUT();
             terms.maxPayout = _input;
         } else if (_parameter == PARAMETER.DISCOUNT_RATE) {
-            if (_input > BPS) revert APIARY__INVALID_DISCOUNT_RATE();
+            // M-09 Fix: Limit discount rate to 50% max
+            if (_input > MAX_DISCOUNT_RATE) revert APIARY__INVALID_DISCOUNT_RATE();
             terms.discountRate = _input;
         } else if (_parameter == PARAMETER.MAX_DEBT) {
             terms.maxDebt = _input;
@@ -426,6 +469,75 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         if (_twap == address(0)) revert APIARY__ZERO_ADDRESS();
         twap = IApiaryUniswapV2TwapOracle(_twap);
         emit TwapUpdated(_twap);
+    }
+
+    /**
+     * @notice L-03 Fix: Update blocks per day for vesting calculations
+     * @dev Adjust if Berachain block time changes from ~5 seconds
+     * @param _blocksPerDay New blocks per day value
+     */
+    function setBlocksPerDay(uint256 _blocksPerDay) external onlyOwner {
+        if (_blocksPerDay == 0) revert APIARY__INVALID_AMOUNT();
+        uint256 oldValue = blocksPerDay;
+        blocksPerDay = _blocksPerDay;
+        emit BlocksPerDayUpdated(oldValue, _blocksPerDay);
+    }
+
+    /**
+     * @notice L-03 Fix: Calculate vesting term in blocks based on days
+     * @param _days Number of days for vesting
+     * @return blocks Number of blocks for the vesting period
+     */
+    function calculateVestingBlocks(uint256 _days) external view returns (uint256 blocks) {
+        return _days * blocksPerDay;
+    }
+
+    /**
+     * @notice M-NEW-02 Fix: Set reference price for deviation checks
+     * @dev Should be called after deployment and periodically updated
+     * @param _referencePrice Reference price in HONEY (18 decimals)
+     */
+    function setReferencePrice(uint256 _referencePrice) external onlyOwner {
+        if (_referencePrice == 0) revert APIARY__INVALID_AMOUNT();
+        uint256 oldPrice = referencePrice;
+        referencePrice = _referencePrice;
+        referencePriceLastUpdate = block.timestamp;
+        emit ReferencePriceUpdated(oldPrice, _referencePrice);
+    }
+
+    /**
+     * @notice M-NEW-02 Fix: Update reference price from current TWAP
+     * @dev Convenience function to sync reference price with current market
+     */
+    function syncReferencePrice() external onlyOwner {
+        uint256 currentPrice = twap.consult(1e9);
+        if (currentPrice == 0) revert APIARY__INVALID_AMOUNT();
+        uint256 oldPrice = referencePrice;
+        referencePrice = currentPrice;
+        referencePriceLastUpdate = block.timestamp;
+        emit ReferencePriceUpdated(oldPrice, currentPrice);
+    }
+
+    /**
+     * @notice M-NEW-02 Fix: Set maximum allowed price deviation
+     * @param _maxDeviation Maximum deviation in basis points (e.g., 2000 = 20%)
+     */
+    function setMaxPriceDeviation(uint256 _maxDeviation) external onlyOwner {
+        // Cap at 50% max deviation, minimum 1%
+        if (_maxDeviation > 5000 || _maxDeviation < 100) revert APIARY__INVALID_PRICE_DEVIATION();
+        uint256 oldDeviation = maxPriceDeviation;
+        maxPriceDeviation = _maxDeviation;
+        emit MaxPriceDeviationUpdated(oldDeviation, _maxDeviation);
+    }
+
+    /**
+     * @notice M-NEW-02 Fix: Disable price deviation check (emergency use)
+     * @dev Sets maxPriceDeviation to 0, disabling the check
+     */
+    function disablePriceDeviationCheck() external onlyOwner {
+        uint256 oldDeviation = maxPriceDeviation;
+        maxPriceDeviation = 0;
+        emit MaxPriceDeviationUpdated(oldDeviation, 0);
     }
 
     /**
@@ -534,6 +646,19 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     ) public returns (uint256 value_, uint256 discountedPriceInHoney) {
         // Get APIARY price from TWAP oracle (in HONEY, 18 decimals)
         uint256 apiaryPrice = twap.consult(1e9); // 1 APIARY in HONEY
+
+        // M-NEW-02 Fix: Check price deviation from reference if reference is set
+        if (referencePrice > 0 && maxPriceDeviation > 0) {
+            uint256 deviation;
+            if (apiaryPrice > referencePrice) {
+                deviation = ((apiaryPrice - referencePrice) * BPS) / referencePrice;
+            } else {
+                deviation = ((referencePrice - apiaryPrice) * BPS) / referencePrice;
+            }
+            if (deviation > maxPriceDeviation) {
+                revert APIARY__PRICE_DEVIATION_TOO_HIGH();
+            }
+        }
 
         if (isLiquidityBond) {
             // For LP bonds, use bonding calculator

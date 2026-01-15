@@ -14,20 +14,37 @@ contract VaultOwned is Ownable2Step {
     address internal _staking;
     address internal _lockUp;
 
+    // M-03 Fix: Add events for address changes
+    event VaultSet(address indexed vault);
+    event StakingSet(address indexed staking);
+    event LockUpSet(address indexed lockUp);
+
+    // M-NEW-01 Fix: Error for zero address validation
+    error VAULT_OWNED__ZERO_ADDRESS();
+
     constructor(address _initialOwner) Ownable(_initialOwner) {}
 
     function setVault(address vault_) external onlyOwner returns (bool) {
+        // M-NEW-01 Fix: Prevent zero address
+        if (vault_ == address(0)) revert VAULT_OWNED__ZERO_ADDRESS();
         _vault = vault_;
+        emit VaultSet(vault_);
         return true;
     }
 
     function setLockUp(address lockUp_) external onlyOwner returns (bool) {
+        // M-NEW-01 Fix: Prevent zero address
+        if (lockUp_ == address(0)) revert VAULT_OWNED__ZERO_ADDRESS();
         _lockUp = lockUp_;
+        emit LockUpSet(lockUp_);
         return true;
     }
 
     function setStaking(address staking_) external onlyOwner returns (bool) {
+        // M-NEW-01 Fix: Prevent zero address
+        if (staking_ == address(0)) revert VAULT_OWNED__ZERO_ADDRESS();
         _staking = staking_;
+        emit StakingSet(staking_);
         return true;
     }
 

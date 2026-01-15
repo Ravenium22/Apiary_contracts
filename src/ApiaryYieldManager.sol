@@ -153,6 +153,9 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Emergency mode (skip swaps, forward directly to treasury)
     bool public emergencyMode;
 
+    /// @notice Keeper address authorized to execute yield (H-01 Fix)
+    address public keeper;
+
     /*//////////////////////////////////////////////////////////////
                                 CONSTANTS
     //////////////////////////////////////////////////////////////*/
@@ -221,6 +224,12 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 totalAmount
     );
 
+    /// @notice H-01 Fix: Emitted when keeper is updated
+    event KeeperUpdated(address indexed oldKeeper, address indexed newKeeper);
+
+    /// @notice M-01 Fix: Emitted when yield is forwarded in emergency mode
+    event EmergencyYieldForwarded(uint256 amount);
+
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -240,6 +249,8 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__NO_PENDING_YIELD();
     error APIARY__EMERGENCY_MODE_ACTIVE();
     error APIARY__ADAPTER_NOT_SET();
+    /// @notice H-01 Fix: Only keeper or owner can execute yield
+    error APIARY__ONLY_KEEPER_OR_OWNER();
 
     /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
@@ -292,6 +303,9 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         slippageTolerance = 50; // 0.5%
         minYieldAmount = 0.1e18; // 0.1 iBGT minimum
         maxExecutionAmount = 10000e18; // 10k iBGT max per execution
+        
+        // H-01 Fix: Initialize keeper to owner
+        keeper = _owner;
         mcThresholdMultiplier = 13000; // 130% (for Phase 2)
     }
 
@@ -328,6 +342,11 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         nonReentrant
         returns (uint256 totalYield, uint256 honeySwapped, uint256 apiaryBurned, uint256 lpCreated, uint256 compounded)
     {
+        // H-01 Fix: Only keeper or owner can execute yield (prevents griefing)
+        if (msg.sender != keeper && msg.sender != owner()) {
+            revert APIARY__ONLY_KEEPER_OR_OWNER();
+        }
+        
         // Anti-griefing: enforce minimum time between executions
         if (block.timestamp < lastExecutionTime + MIN_EXECUTION_INTERVAL) {
             revert APIARY__EXECUTION_TOO_SOON();
@@ -393,6 +412,8 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         if (emergencyMode) {
             // Emergency: forward all to treasury
             ibgtToken.safeTransfer(treasury, totalYield);
+            // M-01 Fix: Emit event for emergency mode visibility
+            emit EmergencyYieldForwarded(totalYield);
             return (0, 0, 0);
         }
 
@@ -1237,6 +1258,22 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         treasury = _treasury;
 
         emit TreasuryUpdated(oldTreasury, _treasury);
+    }
+
+    /**
+     * @notice H-01 Fix: Update keeper address
+     * @dev Keeper is authorized to call executeYield()
+     * @param _keeper New keeper address
+     */
+    function setKeeper(address _keeper) external onlyOwner {
+        if (_keeper == address(0)) {
+            revert APIARY__ZERO_ADDRESS();
+        }
+
+        address oldKeeper = keeper;
+        keeper = _keeper;
+
+        emit KeeperUpdated(oldKeeper, _keeper);
     }
 
     /**

@@ -418,4 +418,27 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     function getLPBalance() external view returns (uint256) {
         return IERC20(APIARY_HONEY_LP).balanceOf(address(this));
     }
+
+    /*//////////////////////////////////////////////////////////////
+                        SYNC FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+    
+    /// @notice M-03 Fix: Emitted when iBGT accounting is synced with actual balance
+    event IBGTAccountingSynced(uint256 oldAvailable, uint256 newAvailable);
+
+    /**
+     * @notice M-03 Fix: Sync iBGT accounting with actual balance
+     * @dev Use if accounting drifts due to direct transfers to treasury
+     *      This sets availableBalance to match actual token balance
+     */
+    function syncIBGTAccounting() external onlyOwner {
+        uint256 actualBalance = IERC20(IBGT).balanceOf(address(this));
+        uint256 oldAvailable = _ibgtAccounting.availableBalance;
+        
+        // Sync available balance with actual token balance
+        // Staked amounts are tracked separately by YieldManager
+        _ibgtAccounting.availableBalance = actualBalance;
+        
+        emit IBGTAccountingSynced(oldAvailable, actualBalance);
+    }
 }

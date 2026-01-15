@@ -23,11 +23,13 @@ contract ApiaryUniswapV2TwapOracle is IApiaryUniswapV2TwapOracle {
 
     FixedPoint.uq112x112 public price0Average;
 
-    error ZERO_ADDRESS();
-    error NO_RESERVES();
+    error APIARY__ZERO_ADDRESS();
+    error APIARY__NO_RESERVES();
+    error APIARY__ORACLE_NOT_INITIALIZED();
+    error APIARY__ORACLE_STALE();
 
     constructor(address _apiaryHoneyPair) {
-        if (_apiaryHoneyPair == address(0)) revert ZERO_ADDRESS();
+        if (_apiaryHoneyPair == address(0)) revert APIARY__ZERO_ADDRESS();
 
         APIARY_HONEY_PAIR = IUniswapV2Pair(_apiaryHoneyPair);
 
@@ -37,7 +39,7 @@ contract ApiaryUniswapV2TwapOracle is IApiaryUniswapV2TwapOracle {
         uint112 reserve1;
         (reserve0, reserve1, blockTimestampLast) = APIARY_HONEY_PAIR.getReserves();
 
-        if (reserve0 == 0 && reserve1 == 0) revert NO_RESERVES();
+        if (reserve0 == 0 && reserve1 == 0) revert APIARY__NO_RESERVES();
     }
 
     function update() public {
@@ -65,6 +67,12 @@ contract ApiaryUniswapV2TwapOracle is IApiaryUniswapV2TwapOracle {
 
     function consult(uint256 amountIn) external returns (uint256 amountOut) {
         update();
+
+        // C-01 Fix: Ensure oracle has been updated at least once with real TWAP data
+        if (price0Average._x == 0) revert APIARY__ORACLE_NOT_INITIALIZED();
+        
+        // C-01 Fix: Ensure we're not using stale data (max 2 hours old)
+        if (block.timestamp - blockTimestampLast > 2 hours) revert APIARY__ORACLE_STALE();
 
         amountOut = price0Average.mul(amountIn).decode144();
     }
