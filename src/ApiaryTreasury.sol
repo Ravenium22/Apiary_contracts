@@ -7,6 +7,8 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { IApiaryToken } from "./interfaces/IApiaryToken.sol";
 import { IApiaryTreasury } from "./interfaces/IApiaryTreasury.sol";
+import { IApiaryUniswapV2TwapOracle } from "./interfaces/IApiaryUniswapV2TwapOracle.sol";
+import { IApiaryBondingCalculator } from "./interfaces/IApiaryBondingCalculator.sol";
 
 /**
  * @title ApiaryTreasury
@@ -55,6 +57,12 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     // iBGT-specific accounting
     IBGTAccounting private _ibgtAccounting;
 
+    // TWAP oracle for APIARY pricing
+    IApiaryUniswapV2TwapOracle public twapOracle;
+
+    // LP bonding calculator for LP token valuation
+    IApiaryBondingCalculator public lpCalculator;
+
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -68,6 +76,15 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     error APIARY__INSUFFICIENT_IBGT_AVAILABLE();
     error APIARY__INSUFFICIENT_IBGT_STAKED();
     error APIARY__INVALID_PRINCIPAL_AMOUNT();
+    error APIARY__TWAP_NOT_SET();
+    error APIARY__LP_CALCULATOR_NOT_SET();
+
+    /*//////////////////////////////////////////////////////////////
+                                EVENTS
+    //////////////////////////////////////////////////////////////*/
+
+    event TwapOracleSet(address indexed twapOracle);
+    event LPCalculatorSet(address indexed lpCalculator);
 
     /*//////////////////////////////////////////////////////////////
                                 MODIFIERS
@@ -383,6 +400,26 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
         emit LiquidityTokenSet(_token, _status);
     }
 
+    /**
+     * @notice Set the TWAP oracle for APIARY pricing
+     * @param _twapOracle Address of the TWAP oracle
+     */
+    function setTwapOracle(address _twapOracle) external onlyOwner {
+        if (_twapOracle == address(0)) revert APIARY__ZERO_ADDRESS();
+        twapOracle = IApiaryUniswapV2TwapOracle(_twapOracle);
+        emit TwapOracleSet(_twapOracle);
+    }
+
+    /**
+     * @notice Set the LP bonding calculator for LP token valuation
+     * @param _lpCalculator Address of the LP calculator
+     */
+    function setLPCalculator(address _lpCalculator) external onlyOwner {
+        if (_lpCalculator == address(0)) revert APIARY__ZERO_ADDRESS();
+        lpCalculator = IApiaryBondingCalculator(_lpCalculator);
+        emit LPCalculatorSet(_lpCalculator);
+    }
+
     /*//////////////////////////////////////////////////////////////
                         VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -417,6 +454,49 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
      */
     function getLPBalance() external view returns (uint256) {
         return IERC20(APIARY_HONEY_LP).balanceOf(address(this));
+    }
+
+    /**
+     * @notice Calculate market cap and treasury value for protocol mode determination
+     * @dev Market cap = APIARY total supply × current TWAP price
+     *      Treasury value = iBGT balance (in HONEY terms) + LP token value
+     * @return marketCap Market capitalization in HONEY (18 decimals)
+     * @return treasuryValue Total treasury value in HONEY (18 decimals)
+     */
+    function getMarketCapAndTreasuryValue() external returns (uint256 marketCap, uint256 treasuryValue) {
+        // Get APIARY price from TWAP oracle (1 APIARY in HONEY, 18 decimals)
+        // Note: consult() is not view because it may update the oracle
+        if (address(twapOracle) == address(0)) {
+            // Return zeros if oracle not set - caller should handle this case
+            return (0, 0);
+        }
+
+        uint256 apiaryPrice = twapOracle.consult(1e9); // Price for 1 APIARY (9 decimals)
+
+        // Calculate market cap: totalSupply * price
+        // APIARY has 9 decimals, price is in 18 decimals for 1e9 APIARY
+        // So: marketCap = totalSupply * price / 1e9
+        uint256 totalSupply = APIARY_TOKEN.totalSupply();
+        marketCap = (totalSupply * apiaryPrice) / 1e9;
+
+        // Calculate treasury value
+        // 1. iBGT value: Get iBGT balance and convert to HONEY value
+        //    For now, assume iBGT ~ HONEY for simplicity (1:1 peg assumption)
+        //    In production, this should use an iBGT/HONEY oracle
+        uint256 ibgtBalance = _ibgtAccounting.availableBalance + _ibgtAccounting.totalStaked;
+        uint256 ibgtValue = ibgtBalance; // 1:1 assumption with HONEY
+
+        // 2. LP token value: Use bonding calculator if set
+        uint256 lpBalance = IERC20(APIARY_HONEY_LP).balanceOf(address(this));
+        uint256 lpValue = 0;
+        if (lpBalance > 0 && address(lpCalculator) != address(0)) {
+            // Bonding calculator returns value in APIARY terms (9 decimals)
+            // Convert to HONEY using current price
+            uint256 lpValueInApiary = lpCalculator.valuation(APIARY_HONEY_LP, lpBalance);
+            lpValue = (lpValueInApiary * apiaryPrice) / 1e9;
+        }
+
+        treasuryValue = ibgtValue + lpValue;
     }
 
     /*//////////////////////////////////////////////////////////////

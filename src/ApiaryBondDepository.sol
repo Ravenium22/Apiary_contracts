@@ -105,6 +105,22 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     // Minimum vesting term: 1 day = 17,280 blocks
     uint256 public constant MINIMUM_VESTING_TERM = 17_280;
 
+    /*//////////////////////////////////////////////////////////////
+                    DYNAMIC DISCOUNT TIER CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Debt ratio tiers for dynamic discount (in basis points)
+    /// @dev Tier boundaries: 0-3%, 3-6%, 6-10%, >10%
+    uint256 public constant DEBT_TIER_1_MAX = 300;   // 3%
+    uint256 public constant DEBT_TIER_2_MAX = 600;   // 6%
+    uint256 public constant DEBT_TIER_3_MAX = 1000;  // 10%
+
+    /// @notice Discount rates for each tier (in basis points)
+    /// @dev Tier 1 (0-3%): 8%, Tier 2 (3-6%): 5%, Tier 3 (6-10%): 3%, Tier 4 (>10%): PAUSED
+    uint256 public constant TIER_1_DISCOUNT = 800;   // 8%
+    uint256 public constant TIER_2_DISCOUNT = 500;   // 5%
+    uint256 public constant TIER_3_DISCOUNT = 300;   // 3%
+
     address public immutable principle;          // iBGT or LP token
     bool public immutable isLiquidityBond;       // true if LP bond
     address public immutable bondCalculator;     // LP valuation calculator
@@ -139,6 +155,10 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice M-NEW-02 Fix: Timestamp of last reference price update
     uint256 public referencePriceLastUpdate;
 
+    /// @notice Whether dynamic debt-ratio based discounts are enabled
+    /// @dev When false, uses static discountRate from terms. When true, calculates discount dynamically.
+    bool public dynamicDiscountsEnabled;
+
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -163,6 +183,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__PRICE_DEVIATION_TOO_HIGH();
     /// @notice M-NEW-02 Fix: Invalid price deviation parameter
     error APIARY__INVALID_PRICE_DEVIATION();
+    /// @notice Bonds paused due to debt ratio exceeding 10%
+    error APIARY__BONDS_PAUSED_HIGH_DEBT();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -197,6 +219,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     event ReferencePriceUpdated(uint256 oldPrice, uint256 newPrice);
     /// @notice M-NEW-02 Fix: Emitted when max price deviation is updated
     event MaxPriceDeviationUpdated(uint256 oldDeviation, uint256 newDeviation);
+    /// @notice Emitted when dynamic discounts are toggled
+    event DynamicDiscountsToggled(bool enabled);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -541,6 +565,21 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
+     * @notice Enable or disable dynamic debt-ratio based discounts
+     * @dev When enabled, discount rates are determined by debt ratio tiers:
+     *      - 0-3% debt: 8% discount
+     *      - 3-6% debt: 5% discount
+     *      - 6-10% debt: 3% discount
+     *      - >10% debt: bonds paused
+     *      When disabled, uses the static discountRate from terms.
+     * @param _enabled True to enable dynamic discounts, false to use static
+     */
+    function setDynamicDiscounts(bool _enabled) external onlyOwner {
+        dynamicDiscountsEnabled = _enabled;
+        emit DynamicDiscountsToggled(_enabled);
+    }
+
+    /**
      * @notice Pause the contract (emergency)
      */
     function pause() external onlyOwner {
@@ -626,11 +665,114 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
 
     /**
      * @notice Calculate discounted bond price
+     * @dev If dynamicDiscountsEnabled, uses debt-ratio based tiered discounts:
+     *      - 0-3% debt ratio: 8% discount
+     *      - 3-6% debt ratio: 5% discount
+     *      - 6-10% debt ratio: 3% discount
+     *      - >10% debt ratio: bonds paused (reverts)
      * @param price Current market price in HONEY
      * @return Discounted price after applying discount rate
      */
     function getBondPrice(uint256 price) public view returns (uint256) {
-        return price.mulDiv(BPS - terms.discountRate, BPS);
+        uint256 discountRate;
+
+        if (dynamicDiscountsEnabled) {
+            discountRate = _getDynamicDiscountRate();
+        } else {
+            discountRate = terms.discountRate;
+        }
+
+        return price.mulDiv(BPS - discountRate, BPS);
+    }
+
+    /**
+     * @notice Get dynamic discount rate based on current debt ratio
+     * @dev Tiered system:
+     *      - Debt ratio 0-3%: 8% discount
+     *      - Debt ratio 3-6%: 5% discount
+     *      - Debt ratio 6-10%: 3% discount
+     *      - Debt ratio >10%: Bonds paused (reverts)
+     * @return discountRate The discount rate in basis points
+     */
+    function _getDynamicDiscountRate() internal view returns (uint256 discountRate) {
+        uint256 currentDebtRatio = _calculateDebtRatio();
+
+        if (currentDebtRatio <= DEBT_TIER_1_MAX) {
+            // 0-3% debt ratio: 8% discount (most attractive)
+            return TIER_1_DISCOUNT;
+        } else if (currentDebtRatio <= DEBT_TIER_2_MAX) {
+            // 3-6% debt ratio: 5% discount
+            return TIER_2_DISCOUNT;
+        } else if (currentDebtRatio <= DEBT_TIER_3_MAX) {
+            // 6-10% debt ratio: 3% discount
+            return TIER_3_DISCOUNT;
+        } else {
+            // >10% debt ratio: bonds paused
+            revert APIARY__BONDS_PAUSED_HIGH_DEBT();
+        }
+    }
+
+    /**
+     * @notice Calculate current debt ratio
+     * @dev Debt ratio = (totalDebt / treasuryReserves) * BPS
+     *      Uses treasury's total reserves for iBGT as denominator
+     * @return ratio Debt ratio in basis points
+     */
+    function _calculateDebtRatio() internal view returns (uint256 ratio) {
+        // Get treasury's total iBGT reserves
+        uint256 treasuryReserves = IApiaryTreasury(treasury).totalReserves(principle);
+
+        if (treasuryReserves == 0) {
+            // No reserves = infinite debt ratio = paused
+            return type(uint256).max;
+        }
+
+        // Calculate ratio: (totalDebt / treasuryReserves) * BPS
+        ratio = totalDebt.mulDiv(BPS, treasuryReserves);
+    }
+
+    /**
+     * @notice Get current discount rate (static or dynamic based on settings)
+     * @return rate Current effective discount rate in basis points
+     */
+    function getCurrentDiscountRate() external view returns (uint256 rate) {
+        if (dynamicDiscountsEnabled) {
+            // This may revert if debt ratio > 10%
+            return _getDynamicDiscountRate();
+        }
+        return terms.discountRate;
+    }
+
+    /**
+     * @notice Check if bonds are available (not paused due to high debt)
+     * @return available True if bonds can be purchased
+     * @return currentDebtRatio Current debt ratio in basis points
+     * @return currentDiscount Current discount rate in basis points
+     */
+    function getBondAvailability() external view returns (
+        bool available,
+        uint256 currentDebtRatio,
+        uint256 currentDiscount
+    ) {
+        currentDebtRatio = _calculateDebtRatio();
+
+        if (!dynamicDiscountsEnabled) {
+            return (true, currentDebtRatio, terms.discountRate);
+        }
+
+        if (currentDebtRatio > DEBT_TIER_3_MAX) {
+            return (false, currentDebtRatio, 0);
+        }
+
+        if (currentDebtRatio <= DEBT_TIER_1_MAX) {
+            currentDiscount = TIER_1_DISCOUNT;
+        } else if (currentDebtRatio <= DEBT_TIER_2_MAX) {
+            currentDiscount = TIER_2_DISCOUNT;
+        } else {
+            currentDiscount = TIER_3_DISCOUNT;
+        }
+
+        return (true, currentDebtRatio, currentDiscount);
     }
 
     /**

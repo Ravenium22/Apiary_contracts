@@ -105,4 +105,11 @@ interface IApiaryTreasury {
     function getIBGTAccounting() external view returns (IBGTAccounting memory);
     function totalReserves(address token) external view returns (uint256);
     function totalBorrowed(address token) external view returns (uint256);
+
+    /**
+     * @notice Calculate market cap and treasury value for protocol mode determination
+     * @return marketCap Market capitalization in HONEY (18 decimals)
+     * @return treasuryValue Total treasury value in HONEY (18 decimals)
+     */
+    function getMarketCapAndTreasuryValue() external returns (uint256 marketCap, uint256 treasuryValue);
 }

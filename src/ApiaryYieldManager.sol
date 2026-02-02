@@ -59,6 +59,19 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
+     * @notice Protocol mode for Phase 2 strategy (with hysteresis)
+     * @dev Modes use buffer zones to prevent oscillation:
+     *      - GROWTH: MC > 32% of TV, exit when MC < 28% of TV
+     *      - NORMAL: MC between thresholds, default distribution
+     *      - BUYBACK: MC < 97% of TV, exit when MC > 105% of TV
+     */
+    enum ProtocolMode {
+        NORMAL,     // Default mode: distribute to stakers + Phase 1 logic
+        GROWTH,     // MC significantly above TV: compound iBGT
+        BUYBACK     // MC below TV: 100% buyback and burn
+    }
+
+    /**
      * @notice Split percentages for yield distribution
      * @dev All values in basis points (10000 = 100%)
      */
@@ -156,6 +169,29 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Keeper address authorized to execute yield (H-01 Fix)
     address public keeper;
 
+    /// @notice Current protocol mode for Phase 2 (with hysteresis)
+    ProtocolMode public currentMode;
+
+    /*//////////////////////////////////////////////////////////////
+                    BUFFER ZONE THRESHOLDS (Phase 2)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Threshold to enter GROWTH mode: MC > TV * growthEntryThreshold / BASIS_POINTS
+    /// @dev Default: 13200 = 132% (MC rises above 32% premium to TV)
+    uint256 public growthEntryThreshold;
+
+    /// @notice Threshold to exit GROWTH mode: MC < TV * growthExitThreshold / BASIS_POINTS
+    /// @dev Default: 12800 = 128% (MC drops below 28% premium to TV)
+    uint256 public growthExitThreshold;
+
+    /// @notice Threshold to enter BUYBACK mode: MC < TV * buybackEntryThreshold / BASIS_POINTS
+    /// @dev Default: 9700 = 97% (MC falls 3% below TV)
+    uint256 public buybackEntryThreshold;
+
+    /// @notice Threshold to exit BUYBACK mode: MC > TV * buybackExitThreshold / BASIS_POINTS
+    /// @dev Default: 10500 = 105% (MC rises 5% above TV)
+    uint256 public buybackExitThreshold;
+
     /*//////////////////////////////////////////////////////////////
                                 CONSTANTS
     //////////////////////////////////////////////////////////////*/
@@ -230,6 +266,17 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice M-01 Fix: Emitted when yield is forwarded in emergency mode
     event EmergencyYieldForwarded(uint256 amount);
 
+    /// @notice Emitted when protocol mode changes (Phase 2 hysteresis)
+    event ProtocolModeChanged(ProtocolMode indexed oldMode, ProtocolMode indexed newMode, uint256 marketCap, uint256 treasuryValue);
+
+    /// @notice Emitted when buffer zone thresholds are updated
+    event BufferThresholdsUpdated(
+        uint256 growthEntry,
+        uint256 growthExit,
+        uint256 buybackEntry,
+        uint256 buybackExit
+    );
+
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -251,6 +298,8 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__ADAPTER_NOT_SET();
     /// @notice H-01 Fix: Only keeper or owner can execute yield
     error APIARY__ONLY_KEEPER_OR_OWNER();
+    /// @notice Invalid buffer zone thresholds
+    error APIARY__INVALID_BUFFER_THRESHOLDS();
 
     /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
@@ -307,6 +356,15 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         // H-01 Fix: Initialize keeper to owner
         keeper = _owner;
         mcThresholdMultiplier = 13000; // 130% (for Phase 2)
+
+        // Initialize buffer zone thresholds for Phase 2 hysteresis
+        // Per docs: Switch to growth when MC > 132% TV, exit when MC < 128% TV
+        // Switch to buyback when MC < 97% TV, exit when MC > 105% TV
+        growthEntryThreshold = 13200;  // 132% - enter growth mode
+        growthExitThreshold = 12800;   // 128% - exit growth mode
+        buybackEntryThreshold = 9700;  // 97% - enter buyback mode
+        buybackExitThreshold = 10500;  // 105% - exit buyback mode
+        currentMode = ProtocolMode.NORMAL;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -448,17 +506,22 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Execute Phase 2 strategy (conditional based on MC/TV)
+     * @notice Execute Phase 2 strategy (conditional based on MC/TV with hysteresis)
      * @param totalYield Total iBGT claimed
      * @return honeySwapped Amount swapped to HONEY
      * @return apiaryBurned Amount of APIARY burned
      * @return lpCreated Amount of LP tokens created
      * @return compounded Amount kept as iBGT
-     * 
-     * Logic:
-     * - If MC > TV * 1.30 → compound (splitConfig.toCompound%)
-     * - If MC within 30% of TV → distribute to stakers (splitConfig.toStakers%)
-     * - If MC < TV → 100% buyback and burn
+     *
+     * Buffer Zone Logic (prevents oscillation):
+     * - GROWTH mode: Enter when MC > 132% TV, exit when MC < 128% TV
+     * - BUYBACK mode: Enter when MC < 97% TV, exit when MC > 105% TV
+     * - NORMAL mode: Default when not in GROWTH or BUYBACK
+     *
+     * Actions by mode:
+     * - GROWTH: Compound iBGT (keep as reserves)
+     * - NORMAL: Distribute to stakers + Phase 1 logic
+     * - BUYBACK: 100% buyback and burn APIARY
      */
     function _executePhase2Strategy(uint256 totalYield)
         internal
@@ -467,27 +530,86 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         // Get market cap and treasury value from treasury contract
         (uint256 marketCap, uint256 treasuryValue) = _getMarketCapAndTV();
 
-        // Determine distribution based on MC/TV ratio
-        if (marketCap > (treasuryValue * mcThresholdMultiplier) / BASIS_POINTS) {
-            // MC > TV * 1.30 → compound
+        // Handle edge case where treasury returns zeros
+        if (treasuryValue == 0) {
+            // Fallback to Phase 1 if we can't determine MC/TV ratio
+            (honeySwapped, apiaryBurned, lpCreated) = _executePhase1Strategy(totalYield);
+            return (honeySwapped, apiaryBurned, lpCreated, 0);
+        }
+
+        // Calculate MC/TV ratio in basis points (e.g., 13200 = 132%)
+        uint256 mcTvRatio = (marketCap * BASIS_POINTS) / treasuryValue;
+
+        // Update protocol mode with hysteresis logic
+        ProtocolMode oldMode = currentMode;
+        ProtocolMode newMode = _determineProtocolMode(mcTvRatio);
+
+        if (newMode != oldMode) {
+            currentMode = newMode;
+            emit ProtocolModeChanged(oldMode, newMode, marketCap, treasuryValue);
+        }
+
+        // Execute strategy based on current mode
+        if (currentMode == ProtocolMode.GROWTH) {
+            // GROWTH mode: Compound iBGT (keep as reserves)
             compounded = (totalYield * splitConfig.toCompound) / BASIS_POINTS;
             ibgtToken.safeTransfer(treasury, compounded);
 
             // Remaining follows Phase 1 logic
             uint256 remaining = totalYield - compounded;
             (honeySwapped, apiaryBurned, lpCreated) = _executePhase1Strategy(remaining);
-        } else if (marketCap < treasuryValue) {
-            // MC < TV → 100% buyback and burn
+        } else if (currentMode == ProtocolMode.BUYBACK) {
+            // BUYBACK mode: 100% buyback and burn
             uint256 apiaryBought = _swapToApiary(totalYield);
             apiaryBurned = _burnApiary(apiaryBought);
         } else {
-            // MC within 30% of TV → distribute to stakers
+            // NORMAL mode: Distribute to stakers + Phase 1 logic
             uint256 toStakersAmount = (totalYield * splitConfig.toStakers) / BASIS_POINTS;
             _distributeToStakers(toStakersAmount);
 
             // Remaining follows Phase 1 logic
             uint256 remaining = totalYield - toStakersAmount;
             (honeySwapped, apiaryBurned, lpCreated) = _executePhase1Strategy(remaining);
+        }
+    }
+
+    /**
+     * @notice Determine protocol mode based on MC/TV ratio with hysteresis
+     * @param mcTvRatio Market cap to treasury value ratio in basis points
+     * @return newMode The protocol mode based on current ratio and hysteresis
+     */
+    function _determineProtocolMode(uint256 mcTvRatio) internal view returns (ProtocolMode newMode) {
+        // Hysteresis logic: mode changes only when crossing specific thresholds
+        // This prevents rapid oscillation between modes
+
+        if (currentMode == ProtocolMode.GROWTH) {
+            // In GROWTH mode: stay until MC drops below exit threshold
+            if (mcTvRatio < growthExitThreshold) {
+                // Check if we should go to BUYBACK or NORMAL
+                if (mcTvRatio < buybackEntryThreshold) {
+                    return ProtocolMode.BUYBACK;
+                }
+                return ProtocolMode.NORMAL;
+            }
+            return ProtocolMode.GROWTH;
+        } else if (currentMode == ProtocolMode.BUYBACK) {
+            // In BUYBACK mode: stay until MC rises above exit threshold
+            if (mcTvRatio > buybackExitThreshold) {
+                // Check if we should go to GROWTH or NORMAL
+                if (mcTvRatio > growthEntryThreshold) {
+                    return ProtocolMode.GROWTH;
+                }
+                return ProtocolMode.NORMAL;
+            }
+            return ProtocolMode.BUYBACK;
+        } else {
+            // In NORMAL mode: check if we should enter GROWTH or BUYBACK
+            if (mcTvRatio > growthEntryThreshold) {
+                return ProtocolMode.GROWTH;
+            } else if (mcTvRatio < buybackEntryThreshold) {
+                return ProtocolMode.BUYBACK;
+            }
+            return ProtocolMode.NORMAL;
         }
     }
 
@@ -1168,7 +1290,7 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
      */
     function getKodiakStats() external view returns (uint256 _totalKodiakRewards, uint256 activeStakes) {
         _totalKodiakRewards = totalKodiakRewards;
-        
+
         if (kodiakAdapter != address(0)) {
             address lpToken = IApiaryKodiakAdapter(kodiakAdapter).getLPToken(
                 address(apiaryToken),
@@ -1178,6 +1300,25 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
                 activeStakes = lpStakeIds[lpToken].length;
             }
         }
+    }
+
+    /**
+     * @notice Get current protocol mode and buffer thresholds
+     * @return mode Current protocol mode (NORMAL, GROWTH, or BUYBACK)
+     * @return thresholds Array of thresholds [growthEntry, growthExit, buybackEntry, buybackExit]
+     */
+    function getProtocolModeInfo() external view returns (ProtocolMode mode, uint256[4] memory thresholds) {
+        mode = currentMode;
+        thresholds = [growthEntryThreshold, growthExitThreshold, buybackEntryThreshold, buybackExitThreshold];
+    }
+
+    /**
+     * @notice Simulate what protocol mode would be for given MC/TV ratio
+     * @param mcTvRatio Market cap to treasury value ratio in basis points
+     * @return wouldBe The mode that would result from this ratio
+     */
+    function simulateProtocolMode(uint256 mcTvRatio) external view returns (ProtocolMode wouldBe) {
+        return _determineProtocolMode(mcTvRatio);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1349,6 +1490,52 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
      */
     function setMCThresholdMultiplier(uint256 _multiplier) external onlyOwner {
         mcThresholdMultiplier = _multiplier;
+    }
+
+    /**
+     * @notice Set buffer zone thresholds for Phase 2 hysteresis
+     * @dev Thresholds must be logically ordered:
+     *      growthEntry > growthExit > buybackExit > buybackEntry
+     * @param _growthEntry Threshold to enter GROWTH mode (e.g., 13200 = 132%)
+     * @param _growthExit Threshold to exit GROWTH mode (e.g., 12800 = 128%)
+     * @param _buybackEntry Threshold to enter BUYBACK mode (e.g., 9700 = 97%)
+     * @param _buybackExit Threshold to exit BUYBACK mode (e.g., 10500 = 105%)
+     */
+    function setBufferThresholds(
+        uint256 _growthEntry,
+        uint256 _growthExit,
+        uint256 _buybackEntry,
+        uint256 _buybackExit
+    ) external onlyOwner {
+        // Validate threshold ordering for proper hysteresis
+        // growthEntry > growthExit (must exit below entry to prevent oscillation)
+        // buybackExit > buybackEntry (must exit above entry to prevent oscillation)
+        // growthExit > buybackExit (no overlap between GROWTH and BUYBACK zones)
+        if (
+            _growthEntry <= _growthExit ||
+            _buybackExit <= _buybackEntry ||
+            _growthExit <= _buybackExit
+        ) {
+            revert APIARY__INVALID_BUFFER_THRESHOLDS();
+        }
+
+        growthEntryThreshold = _growthEntry;
+        growthExitThreshold = _growthExit;
+        buybackEntryThreshold = _buybackEntry;
+        buybackExitThreshold = _buybackExit;
+
+        emit BufferThresholdsUpdated(_growthEntry, _growthExit, _buybackEntry, _buybackExit);
+    }
+
+    /**
+     * @notice Manually set the protocol mode (admin override)
+     * @dev Use with caution - bypasses hysteresis logic
+     * @param _mode New protocol mode to set
+     */
+    function setProtocolMode(ProtocolMode _mode) external onlyOwner {
+        ProtocolMode oldMode = currentMode;
+        currentMode = _mode;
+        emit ProtocolModeChanged(oldMode, _mode, 0, 0);
     }
 
     /**
