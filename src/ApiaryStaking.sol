@@ -2,7 +2,6 @@
 pragma solidity 0.8.26;
 
 import { Ownable2Step, Ownable } from "@openzeppelin/contracts/access/Ownable2Step.sol";
-import { SafeMath } from "./libs/SafeMath.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
@@ -35,7 +34,7 @@ interface IApiaryToken is IERC20 {
 }
 
 contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
-    using SafeMath for uint256;
+    // L-02 Fix: Removed SafeMath - Solidity 0.8+ has built-in overflow checks
     using SafeERC20 for IERC20;
 
     /*//////////////////////////////////////////////////////////////
@@ -76,6 +75,8 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     event LockerSet(address indexed locker);
     /// @notice L-02 Fix: Emitted when totalStaked changes
     event TotalStakedUpdated(uint256 oldValue, uint256 newValue);
+    /// @notice LOW-05 Fix: Emitted when updateLastStakedTime fails silently
+    event StakedTimeUpdateFailed(address indexed recipient);
 
     /*//////////////////////////////////////////////////////////////
                         ERRORS
@@ -87,6 +88,10 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__TRANSFER_FAILED();
     /// @notice M-02 Fix: Insufficient sAPIARY balance for staking
     error APIARY__INSUFFICIENT_SAPIARY_BALANCE();
+    /// @notice H-01 Fix: sAPIARY cannot be retrieved
+    error APIARY__SAPIARY_NOT_RETRIEVABLE();
+    /// @notice HIGH-04 Fix: Unauthorized rebase caller
+    error APIARY__UNAUTHORIZED_REBASE();
 
     /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
@@ -141,18 +146,21 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
         nonReentrant 
         returns (bool) 
     {
-        rebase();
+        _rebase();
 
         // Update the last staked time on the APIARY token contract
         // H-06 Fix: Use try-catch to prevent staking failure if timestamp update reverts
-        try IApiaryToken(APIARY).updateLastStakedTime(_recipient) {} catch {}
+        // LOW-05 Fix: Emit event on failure for visibility
+        try IApiaryToken(APIARY).updateLastStakedTime(_recipient) {} catch {
+            emit StakedTimeUpdateFailed(_recipient);
+        }
 
         // Transfer APIARY from user to this contract
         IERC20(APIARY).safeTransferFrom(msg.sender, address(this), _amount);
 
         // L-02 Fix: Emit event for totalStaked change
         uint256 oldTotalStaked = totalStaked;
-        totalStaked = totalStaked.add(_amount);
+        totalStaked = totalStaked + _amount;
         emit TotalStakedUpdated(oldTotalStaked, totalStaked);
 
         // M-02 Fix: Verify sufficient sAPIARY balance before transfer
@@ -179,17 +187,18 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
      */
     function unstake(uint256 _amount, bool _trigger) external whenNotPaused nonReentrant {
         if (_trigger) {
-            rebase();
+            _rebase();
         }
+
+        // HIGH-02 Fix: CEI pattern - take sAPIARY first (interaction), then update state
+        // Take sAPIARY from user
+        IERC20(sAPIARY).safeTransferFrom(msg.sender, address(this), _amount);
 
         // L-02 Fix: Emit event for totalStaked change
         uint256 oldTotalStaked = totalStaked;
-        totalStaked = totalStaked.sub(_amount);
+        totalStaked = totalStaked - _amount;
         emit TotalStakedUpdated(oldTotalStaked, totalStaked);
 
-        // Take sAPIARY from user
-        IERC20(sAPIARY).safeTransferFrom(msg.sender, address(this), _amount);
-        
         // Give APIARY to user
         IERC20(APIARY).safeTransfer(msg.sender, _amount);
 
@@ -204,14 +213,16 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     function unstakeFor(address _recipient, uint256 _amount) external whenNotPaused nonReentrant {
         if (msg.sender != locker) revert APIARY__ONLY_LOCKER();
 
-        rebase();
+        _rebase();
+
+        // HIGH-02 Fix: CEI pattern - take sAPIARY first, then update state
+        IERC20(sAPIARY).safeTransferFrom(_recipient, address(this), _amount);
 
         // L-02 Fix: Emit event for totalStaked change
         uint256 oldTotalStaked = totalStaked;
-        totalStaked = totalStaked.sub(_amount);
+        totalStaked = totalStaked - _amount;
         emit TotalStakedUpdated(oldTotalStaked, totalStaked);
 
-        IERC20(sAPIARY).safeTransferFrom(_recipient, address(this), _amount);
         IERC20(APIARY).safeTransfer(_recipient, _amount);
 
         emit Unstaked(_recipient, _amount);
@@ -222,17 +233,28 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Trigger rebase if epoch has ended
+     * @notice HIGH-04 Fix: Public rebase restricted to owner or distributor
+     * @dev Prevents unauthorized triggering of epoch advancement and distribution
+     */
+    function rebase() external {
+        if (msg.sender != owner() && msg.sender != distributor) {
+            revert APIARY__UNAUTHORIZED_REBASE();
+        }
+        _rebase();
+    }
+
+    /**
+     * @notice Internal rebase logic - trigger rebase if epoch has ended
      * @dev In Phase 1, distribute is always 0 (no yield)
      *      In Phase 2, distribute will be calculated based on profits
      */
-    function rebase() public {
+    function _rebase() internal {
         if (epoch.endBlock <= block.number) {
             // Call rebase on sAPIARY contract
             IsAPIARY(sAPIARY).rebase(epoch.distribute, epoch.number);
 
             // Move to next epoch
-            epoch.endBlock = epoch.endBlock.add(epoch.length);
+            epoch.endBlock = epoch.endBlock + epoch.length;
             epoch.number++;
 
             // Trigger distributor if set (Phase 2)
@@ -249,7 +271,7 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
             if (balance <= staked) {
                 epoch.distribute = 0;
             } else {
-                epoch.distribute = balance.sub(staked);
+                epoch.distribute = balance - staked;
             }
 
             emit Rebased(epoch.number, epoch.distribute);
@@ -273,7 +295,7 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
      * @return Total APIARY held by contract
      */
     function contractBalance() public view returns (uint256) {
-        return IERC20(APIARY).balanceOf(address(this)).add(totalBonus);
+        return IERC20(APIARY).balanceOf(address(this)) + totalBonus;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -287,7 +309,7 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     function giveLockBonus(uint256 _amount) external {
         if (msg.sender != locker) revert APIARY__ONLY_LOCKER();
         
-        totalBonus = totalBonus.add(_amount);
+        totalBonus = totalBonus + _amount;
         IERC20(sAPIARY).safeTransfer(locker, _amount);
     }
 
@@ -298,7 +320,7 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     function returnLockBonus(uint256 _amount) external {
         if (msg.sender != locker) revert APIARY__ONLY_LOCKER();
         
-        totalBonus = totalBonus.sub(_amount);
+        totalBonus = totalBonus - _amount;
         IERC20(sAPIARY).safeTransferFrom(locker, address(this), _amount);
     }
 
@@ -356,22 +378,10 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
             uint256 excess = apiaryBalance > totalStaked ? apiaryBalance - totalStaked : 0;
             require(amount <= excess, "ApiaryStaking: cannot drain staked funds");
         }
-        
-        // Prevent draining sAPIARY
-        if (token == sAPIARY) {
-            // Only allow retrieval of excess sAPIARY
-            uint256 sApiaryBalance = IERC20(sAPIARY).balanceOf(address(this));
-            // In normal operation, staking contract shouldn't hold sAPIARY
-            // It sends directly to stakers immediately
-            // Allow retrieval only if there's unexpected balance
-            require(sApiaryBalance >= amount, "ApiaryStaking: insufficient balance");
-        }
 
-        // Retrieve any ETH balance
-        uint256 ethBalance = address(this).balance;
-        if (ethBalance != 0) {
-            (bool success,) = payable(msg.sender).call{ value: ethBalance }("");
-            if (!success) revert APIARY__TRANSFER_FAILED();
+        // H-01 Fix: Block sAPIARY retrieval entirely to protect staker pool
+        if (token == sAPIARY) {
+            revert APIARY__SAPIARY_NOT_RETRIEVABLE();
         }
 
         // Retrieve specified token
@@ -379,4 +389,19 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
             IERC20(token).safeTransfer(msg.sender, amount);
         }
     }
+
+    /**
+     * @notice H-03 Fix: Separate ETH withdrawal function
+     * @dev Prevents ETH being sent unintentionally during token retrieval
+     *      and avoids DoS if owner contract can't receive ETH
+     */
+    function retrieveETH() external onlyOwner {
+        uint256 ethBalance = address(this).balance;
+        if (ethBalance == 0) revert APIARY__TRANSFER_FAILED();
+        (bool success,) = payable(msg.sender).call{ value: ethBalance }("");
+        if (!success) revert APIARY__TRANSFER_FAILED();
+    }
+
+    /// @notice LOW-01 Fix: Allow contract to receive ETH (makes retrieveETH() functional)
+    receive() external payable {}
 }

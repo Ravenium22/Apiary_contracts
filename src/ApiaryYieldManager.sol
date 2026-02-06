@@ -127,6 +127,9 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Slippage tolerance in basis points (default: 50 = 0.5%)
     uint256 public slippageTolerance;
 
+    /// @notice M-04 Fix: Emergency slippage tolerance for multi-hop fallback (default: 1000 = 10%)
+    uint256 public emergencySlippageBps;
+
     /// @notice Minimum yield amount to execute (prevent dust execution)
     uint256 public minYieldAmount;
 
@@ -350,6 +353,7 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
 
         // Default parameters
         slippageTolerance = 50; // 0.5%
+        emergencySlippageBps = 1000; // M-04 Fix: 10% max loss in emergency multi-hop path
         minYieldAmount = 0.1e18; // 0.1 iBGT minimum
         maxExecutionAmount = 10000e18; // 10k iBGT max per execution
         
@@ -685,10 +689,12 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
                 path[1] = address(honeyToken);
                 path[2] = address(ibgtToken);
 
+                // M-04 Fix: Use emergency slippage tolerance instead of zero
+                uint256 minOut = (rewardsClaimed * (BASIS_POINTS - emergencySlippageBps)) / BASIS_POINTS;
                 claimedAmount = IApiaryKodiakAdapter(kodiakAdapter).swapMultiHop(
                     path,
                     rewardsClaimed,
-                    0, // Accept any amount in emergency
+                    minOut,
                     address(this)
                 );
             }
@@ -915,6 +921,11 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         nonReentrant
         returns (address[] memory rewardTokens, uint256[] memory rewardAmounts)
     {
+        // H-04 Fix: Restrict to keeper/owner to prevent MEV sandwich attacks
+        if (msg.sender != keeper && msg.sender != owner()) {
+            revert APIARY__ONLY_KEEPER_OR_OWNER();
+        }
+
         if (kodiakAdapter == address(0)) {
             revert APIARY__ADAPTER_NOT_SET();
         }
@@ -947,6 +958,11 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         nonReentrant
         returns (uint256 ibgtReceived)
     {
+        // H-04 Fix: Restrict to keeper/owner to prevent MEV sandwich attacks
+        if (msg.sender != keeper && msg.sender != owner()) {
+            revert APIARY__ONLY_KEEPER_OR_OWNER();
+        }
+
         if (kodiakAdapter == address(0)) {
             revert APIARY__ADAPTER_NOT_SET();
         }
@@ -1102,14 +1118,23 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         view
         returns (uint256 honeyForLP)
     {
-        if (kodiakAdapter == address(0)) {
-            // Fallback to simple min
-            return apiaryAmount < availableHoney ? apiaryAmount : availableHoney;
+        if (kodiakAdapter == address(0) || apiaryAmount == 0) {
+            return availableHoney;
         }
 
-        // Simple ratio-based calculation since quoteAddLiquidity may not be available
-        // Use 1:1 ratio assumption or available honey, whichever is less
-        honeyForLP = apiaryAmount < availableHoney ? apiaryAmount : availableHoney;
+        // MEDIUM-04 Fix: Query pool pricing instead of naive 1:1 ratio assumption
+        // Use getAmountOut to determine the HONEY equivalent of the APIARY amount
+        // This approximates the correct pool ratio for LP provision
+        try IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
+            address(apiaryToken),
+            address(honeyToken),
+            apiaryAmount
+        ) returns (uint256 optimalHoney) {
+            honeyForLP = optimalHoney < availableHoney ? optimalHoney : availableHoney;
+        } catch {
+            // Fallback to available honey if quote fails
+            honeyForLP = availableHoney;
+        }
     }
 
     /**
@@ -1138,13 +1163,14 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
      * @return marketCap Current market cap
      * @return treasuryValue Current treasury value
      */
-    function _getMarketCapAndTV() internal view returns (uint256 marketCap, uint256 treasuryValue) {
-        // Call treasury contract to get values
-        // Placeholder implementation
+    // C-03 Fix: Removed `view` modifier and changed `staticcall` to `call`
+    // because treasury.getMarketCapAndTreasuryValue() calls twapOracle.consult()
+    // which modifies state (updates TWAP), making staticcall always fail silently
+    function _getMarketCapAndTV() internal returns (uint256 marketCap, uint256 treasuryValue) {
         if (treasury == address(0)) return (0, 0);
 
         (bool success, bytes memory data) =
-            treasury.staticcall(abi.encodeWithSignature("getMarketCapAndTreasuryValue()"));
+            treasury.call(abi.encodeWithSignature("getMarketCapAndTreasuryValue()"));
 
         if (success) {
             (marketCap, treasuryValue) = abi.decode(data, (uint256, uint256));
@@ -1384,6 +1410,17 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         slippageTolerance = _slippage;
 
         emit SlippageToleranceUpdated(oldTolerance, _slippage);
+    }
+
+    /**
+     * @notice M-04 Fix: Set emergency slippage tolerance for multi-hop fallback swaps
+     * @param _slippage Emergency slippage in basis points (max 2000 = 20%)
+     */
+    function setEmergencySlippage(uint256 _slippage) external onlyOwner {
+        if (_slippage > 2000) {
+            revert APIARY__SLIPPAGE_TOO_HIGH();
+        }
+        emergencySlippageBps = _slippage;
     }
 
     /**

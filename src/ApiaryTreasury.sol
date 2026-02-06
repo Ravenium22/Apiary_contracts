@@ -63,6 +63,13 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     // LP bonding calculator for LP token valuation
     IApiaryBondingCalculator public lpCalculator;
 
+    /// @notice H-02 Fix: Maximum APIARY mintable per deposit call (0 = unlimited)
+    uint256 public maxMintPerDeposit;
+
+    /// @notice HIGH-01 Fix: Maximum mint-to-deposit ratio in basis points (e.g., 12000 = 120%)
+    /// @dev Prevents a compromised depositor from passing inflated value. 0 = disabled.
+    uint256 public maxMintRatioBps;
+
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -78,6 +85,10 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     error APIARY__INVALID_PRINCIPAL_AMOUNT();
     error APIARY__TWAP_NOT_SET();
     error APIARY__LP_CALCULATOR_NOT_SET();
+    /// @notice H-02 Fix: Mint value exceeds maximum allowed per deposit
+    error APIARY__EXCESSIVE_MINT_VALUE();
+    /// @notice HIGH-01 Fix: Mint value exceeds allowed ratio relative to deposit amount
+    error APIARY__EXCESSIVE_MINT_RATIO();
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
@@ -85,6 +96,8 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
 
     event TwapOracleSet(address indexed twapOracle);
     event LPCalculatorSet(address indexed lpCalculator);
+    /// @notice H-02 Fix: Emitted when max mint per deposit is updated
+    event MaxMintPerDepositSet(uint256 maxMint);
 
     /*//////////////////////////////////////////////////////////////
                                 MODIFIERS
@@ -179,6 +192,28 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
         } else if (isLiquidityToken[_token]) {
             if (!isLiquidityDepositor[msg.sender]) {
                 revert APIARY__INVALID_LIQUIDITY_DEPOSITOR();
+            }
+        }
+
+        // H-02 Fix: Validate mint value is within bounds
+        if (maxMintPerDeposit > 0 && value > maxMintPerDeposit) {
+            revert APIARY__EXCESSIVE_MINT_VALUE();
+        }
+
+        // HIGH-01 Fix: Validate mint value is reasonable relative to deposit amount
+        if (maxMintRatioBps > 0) {
+            uint256 maxReasonableValue;
+            if (isLiquidityToken[_token] && address(lpCalculator) != address(0)) {
+                // For LP tokens, use bonding calculator for valuation
+                uint256 calculatedValue = lpCalculator.valuation(_token, _amount);
+                maxReasonableValue = (calculatedValue * maxMintRatioBps) / 10000;
+            } else {
+                // For reserve tokens (iBGT), value ~ amount adjusted for decimals
+                // iBGT is 18 decimals, APIARY is 9 decimals, so 1e18 iBGT -> 1e9 APIARY
+                maxReasonableValue = (_amount * maxMintRatioBps) / 10000;
+            }
+            if (value > maxReasonableValue) {
+                revert APIARY__EXCESSIVE_MINT_RATIO();
             }
         }
 
@@ -401,6 +436,27 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     }
 
     /**
+     * @notice H-02 Fix: Set maximum APIARY mint value per deposit call
+     * @dev Prevents a compromised depositor from minting disproportionate APIARY
+     *      Set to 0 to disable the limit
+     * @param _maxMint Maximum APIARY mintable per deposit (9 decimals)
+     */
+    function setMaxMintPerDeposit(uint256 _maxMint) external onlyOwner {
+        maxMintPerDeposit = _maxMint;
+        emit MaxMintPerDepositSet(_maxMint);
+    }
+
+    /**
+     * @notice HIGH-01 Fix: Set maximum mint-to-deposit ratio
+     * @dev Prevents depositors from minting disproportionate APIARY relative to deposit
+     *      Set to 0 to disable ratio check. Recommended: 12000 (120%) for 20% tolerance.
+     * @param _maxRatioBps Maximum ratio in basis points (e.g., 12000 = 120%)
+     */
+    function setMaxMintRatio(uint256 _maxRatioBps) external onlyOwner {
+        maxMintRatioBps = _maxRatioBps;
+    }
+
+    /**
      * @notice Set the TWAP oracle for APIARY pricing
      * @param _twapOracle Address of the TWAP oracle
      */
@@ -514,11 +570,17 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     function syncIBGTAccounting() external onlyOwner {
         uint256 actualBalance = IERC20(IBGT).balanceOf(address(this));
         uint256 oldAvailable = _ibgtAccounting.availableBalance;
-        
+
+        // M-07 Fix: Also update totalReserves when syncing to prevent accounting mismatch
+        if (actualBalance > oldAvailable) {
+            uint256 surplus = actualBalance - oldAvailable;
+            totalReserves[IBGT] += surplus;
+        }
+
         // Sync available balance with actual token balance
         // Staked amounts are tracked separately by YieldManager
         _ibgtAccounting.availableBalance = actualBalance;
-        
+
         emit IBGTAccountingSynced(oldAvailable, actualBalance);
     }
 }

@@ -2,7 +2,6 @@
 pragma solidity 0.8.26;
 
 import { Ownable2Step, Ownable } from "@openzeppelin/contracts/access/Ownable2Step.sol";
-import { SafeMath } from "./libs/SafeMath.sol";
 import { ERC20 } from "./libs/ERC20.sol";
 import { IERC20 } from "./interfaces/IERC20.sol";
 import { Counters } from "./libs/ERC20Permit.sol";
@@ -30,6 +29,10 @@ abstract contract ERC20Permit is ERC20, IERC2612Permit {
     // keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
     bytes32 public constant PERMIT_TYPEHASH = 0x6e71edae12b1b97f4d1f60370fef10105fa2faae0126114a169c64845d6126c9;
 
+    // M-02 Fix: Store initial chain ID and domain separator for fork detection
+    uint256 private immutable INITIAL_CHAIN_ID;
+    bytes32 private immutable INITIAL_DOMAIN_SEPARATOR;
+
     bytes32 public DOMAIN_SEPARATOR;
 
     constructor() {
@@ -38,12 +41,30 @@ abstract contract ERC20Permit is ERC20, IERC2612Permit {
             chainID := chainid()
         }
 
-        DOMAIN_SEPARATOR = keccak256(
+        INITIAL_CHAIN_ID = chainID;
+        INITIAL_DOMAIN_SEPARATOR = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
                 keccak256(bytes(name())),
                 keccak256(bytes("1")), // Version
                 chainID,
+                address(this)
+            )
+        );
+        DOMAIN_SEPARATOR = INITIAL_DOMAIN_SEPARATOR;
+    }
+
+    /// @notice M-02 Fix: Recompute DOMAIN_SEPARATOR if chain ID changed (fork protection)
+    function _domainSeparator() internal view returns (bytes32) {
+        if (block.chainid == INITIAL_CHAIN_ID) {
+            return INITIAL_DOMAIN_SEPARATOR;
+        }
+        return keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes(name())),
+                keccak256(bytes("1")),
+                block.chainid,
                 address(this)
             )
         );
@@ -59,7 +80,8 @@ abstract contract ERC20Permit is ERC20, IERC2612Permit {
         bytes32 hashStruct =
             keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, amount, _nonces[owner].current(), deadline));
 
-        bytes32 _hash = keccak256(abi.encodePacked(uint16(0x1901), DOMAIN_SEPARATOR, hashStruct));
+        // M-02 Fix: Use dynamic domain separator for fork protection
+        bytes32 _hash = keccak256(abi.encodePacked(uint16(0x1901), _domainSeparator(), hashStruct));
 
         address signer = ecrecover(_hash, v, r, s);
         require(signer != address(0) && signer == owner, "Permit: Invalid signature");
@@ -74,7 +96,7 @@ abstract contract ERC20Permit is ERC20, IERC2612Permit {
 }
 
 contract sApiary is ERC20Permit, Ownable2Step {
-    using SafeMath for uint256;
+    // L-02 Fix: Removed SafeMath - Solidity 0.8+ has built-in overflow checks
 
     /*//////////////////////////////////////////////////////////////
                                 MODIFIERS
@@ -143,6 +165,12 @@ contract sApiary is ERC20Permit, Ownable2Step {
 
     Rebase[] public rebases;
 
+    /// @notice MEDIUM-06 Fix: Maximum number of rebase entries stored on-chain
+    uint256 public constant MAX_REBASES_STORED = 1000;
+
+    /// @notice MEDIUM-06 Fix: Next write index for ring buffer (wraps around at MAX_REBASES_STORED)
+    uint256 public rebaseWriteIndex;
+
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -158,7 +186,7 @@ contract sApiary is ERC20Permit, Ownable2Step {
     constructor(address _initialOwner) ERC20("Staked Apiary", "sAPIARY", 9) ERC20Permit() Ownable(_initialOwner) {
         initializer = msg.sender;
         _totalSupply = INITIAL_FRAGMENTS_SUPPLY;
-        _gonsPerFragment = TOTAL_GONS.div(_totalSupply);
+        _gonsPerFragment = TOTAL_GONS / _totalSupply;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -219,13 +247,13 @@ contract sApiary is ERC20Permit, Ownable2Step {
             return _totalSupply;
         } else if (circulatingSupply_ > 0) {
             // Calculate proportional rebase: profit_ * totalSupply / circulatingSupply
-            rebaseAmount = profit_.mul(_totalSupply).div(circulatingSupply_);
+            rebaseAmount = profit_ * _totalSupply / circulatingSupply_;
         } else {
             rebaseAmount = profit_;
         }
 
         // Increase total supply
-        _totalSupply = _totalSupply.add(rebaseAmount);
+        _totalSupply = _totalSupply + rebaseAmount;
 
         // Cap at MAX_SUPPLY to prevent overflow
         if (_totalSupply > MAX_SUPPLY) {
@@ -236,7 +264,7 @@ contract sApiary is ERC20Permit, Ownable2Step {
         require(_totalSupply > 0, "sApiary: zero supply");
 
         // Update the conversion rate (this is what makes balances increase)
-        _gonsPerFragment = TOTAL_GONS.div(_totalSupply);
+        _gonsPerFragment = TOTAL_GONS / _totalSupply;
 
         _storeRebase(circulatingSupply_, profit_, epoch_);
 
@@ -257,19 +285,25 @@ contract sApiary is ERC20Permit, Ownable2Step {
             return true;
         }
         
-        uint256 rebasePercent = profit_.mul(1e18).div(previousCirculating_);
+        uint256 rebasePercent = profit_ * 1e18 / previousCirculating_;
 
-        rebases.push(
-            Rebase({
-                epoch: epoch_,
-                rebase: rebasePercent, // 18 decimals
-                totalStakedBefore: previousCirculating_,
-                totalStakedAfter: circulatingSupply(),
-                amountRebased: profit_,
-                index: index(),
-                blockNumberOccured: block.number
-            })
-        );
+        Rebase memory newRebase = Rebase({
+            epoch: epoch_,
+            rebase: rebasePercent, // 18 decimals
+            totalStakedBefore: previousCirculating_,
+            totalStakedAfter: circulatingSupply(),
+            amountRebased: profit_,
+            index: index(),
+            blockNumberOccured: block.number
+        });
+
+        // MEDIUM-06 Fix: Ring buffer - overwrite oldest entry once max is reached
+        if (rebases.length < MAX_REBASES_STORED) {
+            rebases.push(newRebase);
+        } else {
+            rebases[rebaseWriteIndex] = newRebase;
+        }
+        rebaseWriteIndex = (rebaseWriteIndex + 1) % MAX_REBASES_STORED;
 
         emit LogSupply(epoch_, block.timestamp, _totalSupply);
         emit LogRebase(epoch_, rebasePercent, index());
@@ -288,7 +322,7 @@ contract sApiary is ERC20Permit, Ownable2Step {
      * @return The token balance.
      */
     function balanceOf(address who) public view override returns (uint256) {
-        return _gonBalances[who].div(_gonsPerFragment);
+        return _gonBalances[who] / _gonsPerFragment;
     }
 
     /**
@@ -297,7 +331,7 @@ contract sApiary is ERC20Permit, Ownable2Step {
      * @return The equivalent amount in gons.
      */
     function gonsForBalance(uint256 amount) public view returns (uint256) {
-        return amount.mul(_gonsPerFragment);
+        return amount * _gonsPerFragment;
     }
 
     /**
@@ -306,7 +340,7 @@ contract sApiary is ERC20Permit, Ownable2Step {
      * @return The equivalent token amount.
      */
     function balanceForGons(uint256 gons) public view returns (uint256) {
-        return gons.div(_gonsPerFragment);
+        return gons / _gonsPerFragment;
     }
 
     /**
@@ -315,7 +349,7 @@ contract sApiary is ERC20Permit, Ownable2Step {
      * @return The circulating supply.
      */
     function circulatingSupply() public view returns (uint256) {
-        return _totalSupply.sub(balanceOf(stakingContract));
+        return _totalSupply - balanceOf(stakingContract);
     }
 
     /**
@@ -342,8 +376,8 @@ contract sApiary is ERC20Permit, Ownable2Step {
         uint256 gonValue = gonsForBalance(value);
         require(_gonBalances[msg.sender] >= gonValue, "sApiary: insufficient balance");
 
-        _gonBalances[msg.sender] = _gonBalances[msg.sender].sub(gonValue);
-        _gonBalances[to] = _gonBalances[to].add(gonValue);
+        _gonBalances[msg.sender] = _gonBalances[msg.sender] - gonValue;
+        _gonBalances[to] = _gonBalances[to] + gonValue;
         
         emit Transfer(msg.sender, to, value);
         return true;
@@ -360,11 +394,11 @@ contract sApiary is ERC20Permit, Ownable2Step {
         uint256 gonValue = gonsForBalance(value);
         require(_gonBalances[from] >= gonValue, "sApiary: insufficient balance");
 
-        _allowedValue[from][msg.sender] = _allowedValue[from][msg.sender].sub(value);
+        _allowedValue[from][msg.sender] = _allowedValue[from][msg.sender] - value;
         emit Approval(from, msg.sender, _allowedValue[from][msg.sender]);
 
-        _gonBalances[from] = _gonBalances[from].sub(gonValue);
-        _gonBalances[to] = _gonBalances[to].add(gonValue);
+        _gonBalances[from] = _gonBalances[from] - gonValue;
+        _gonBalances[to] = _gonBalances[to] + gonValue;
         
         emit Transfer(from, to, value);
 
@@ -412,7 +446,7 @@ contract sApiary is ERC20Permit, Ownable2Step {
      * @param addedValue The amount to increase.
      */
     function increaseAllowance(address spender, uint256 addedValue) public override returns (bool) {
-        _allowedValue[msg.sender][spender] = _allowedValue[msg.sender][spender].add(addedValue);
+        _allowedValue[msg.sender][spender] = _allowedValue[msg.sender][spender] + addedValue;
         emit Approval(msg.sender, spender, _allowedValue[msg.sender][spender]);
         return true;
     }
@@ -427,7 +461,7 @@ contract sApiary is ERC20Permit, Ownable2Step {
         if (subtractedValue >= oldValue) {
             _allowedValue[msg.sender][spender] = 0;
         } else {
-            _allowedValue[msg.sender][spender] = oldValue.sub(subtractedValue);
+            _allowedValue[msg.sender][spender] = oldValue - subtractedValue;
         }
         emit Approval(msg.sender, spender, _allowedValue[msg.sender][spender]);
         return true;

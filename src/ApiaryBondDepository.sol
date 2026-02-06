@@ -155,9 +155,15 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice M-NEW-02 Fix: Timestamp of last reference price update
     uint256 public referencePriceLastUpdate;
 
+    /// @notice M-05 Fix: Last block number when debt was decayed
+    uint256 public lastDecayBlock;
+
     /// @notice Whether dynamic debt-ratio based discounts are enabled
     /// @dev When false, uses static discountRate from terms. When true, calculates discount dynamically.
     bool public dynamicDiscountsEnabled;
+
+    /// @notice CRITICAL-01 Fix: Last TWAP price used during deposit, cached for view queries
+    uint256 public lastCachedApiaryPrice;
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -294,6 +300,9 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         if (amount == 0) revert APIARY__INVALID_AMOUNT();
         if (maxPriceInHoney == 0) revert APIARY__INVALID_MAX_PRICE();
 
+        // M-05 Fix: Decay outstanding debt before processing new bond
+        _decayDebt();
+
         // Calculate bond value and discounted price
         (uint256 payOut, uint256 discountedPriceInHoney) = valueOf(principle, amount);
 
@@ -309,7 +318,10 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
 
         // Check payout bounds
         if (payOut < MINIMUM_PAYOUT) revert APIARY__BOND_TOO_SMALL();
-        if (payOut > maxPayout()) revert APIARY__BOND_TOO_LARGE();
+        // L-05 Fix: Descriptive revert when treasury allocation is exhausted
+        uint256 _maxPayout = maxPayout();
+        if (_maxPayout == 0) revert APIARY__BOND_SOLD_OUT();
+        if (payOut > _maxPayout) revert APIARY__BOND_TOO_LARGE();
 
         // Transfer principle tokens from user to this contract
         IERC20(principle).safeTransferFrom(msg.sender, address(this), amount);
@@ -374,17 +386,17 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
             payout = bond.payout;
             bond.payout = 0;
             bond.redeemed = true;
-            totalDebt -= payout;
-            
+
             emit BondRedeemed(msg.sender, bondIndex, payout, 0);
         } else {
             // Partially vested - pay proportionally
             payout = bond.payout.mulDiv(percentVested, BPS);
             bond.payout -= payout;
-            totalDebt -= payout;
-            
+
             emit BondRedeemed(msg.sender, bondIndex, payout, bond.payout);
         }
+        // MEDIUM-05 Fix: totalDebt reduction removed from redeem() to prevent
+        // double-counting with _decayDebt(). Debt is now solely managed by linear decay.
 
         IERC20(APIARY).safeTransfer(msg.sender, payout);
     }
@@ -418,7 +430,7 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
                     }
 
                     totalPayout += payout;
-                    totalDebt -= payout;
+                    // MEDIUM-05 Fix: totalDebt reduction removed - handled by _decayDebt()
 
                     emit BondRedeemed(msg.sender, i, payout, bonds[i].payout);
                 }
@@ -605,8 +617,40 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 balance = IERC20(_token).balanceOf(address(this));
         if (balance < _amount) revert APIARY__INVALID_AMOUNT();
 
+        // C-02 Fix: Protect APIARY reserved for bond holder redemptions
+        if (_token == APIARY) {
+            uint256 excess = balance > totalDebt ? balance - totalDebt : 0;
+            if (_amount > excess) revert APIARY__INVALID_AMOUNT();
+        }
+
         IERC20(_token).safeTransfer(msg.sender, _amount);
         emit TokensClawedBack(_token, _amount);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        DEBT DECAY (M-05 Fix)
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice M-05 Fix: Decay totalDebt based on elapsed vesting time
+     * @dev Prevents ghost debt from unredeemed bonds inflating debt ratio
+     *      Called at the start of deposit() to ensure accurate debt tracking
+     */
+    function _decayDebt() internal {
+        if (lastDecayBlock == 0) {
+            lastDecayBlock = block.number;
+            return;
+        }
+        uint256 elapsed = block.number - lastDecayBlock;
+        if (elapsed > 0 && totalDebt > 0 && terms.vestingTerm > 0) {
+            // MEDIUM-02 Fix: Cap elapsed at vestingTerm to prevent over-decay
+            if (elapsed > terms.vestingTerm) {
+                elapsed = terms.vestingTerm;
+            }
+            uint256 decay = (totalDebt * elapsed) / terms.vestingTerm;
+            totalDebt = totalDebt > decay ? totalDebt - decay : 0;
+            lastDecayBlock = block.number;
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -777,6 +821,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
 
     /**
      * @notice Calculate value of principle tokens in APIARY terms
+     * @dev CRITICAL-01 Fix: Changed from public to internal to prevent unguarded oracle state changes.
+     *      External callers should use quoteValue() view function instead.
      * @param _token Token address (should match principle)
      * @param _amount Amount of tokens
      * @return value_ APIARY payout amount
@@ -785,9 +831,12 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     function valueOf(
         address _token,
         uint256 _amount
-    ) public returns (uint256 value_, uint256 discountedPriceInHoney) {
+    ) internal returns (uint256 value_, uint256 discountedPriceInHoney) {
         // Get APIARY price from TWAP oracle (in HONEY, 18 decimals)
         uint256 apiaryPrice = twap.consult(1e9); // 1 APIARY in HONEY
+
+        // CRITICAL-01 Fix: Cache price for view queries (quoteValue)
+        lastCachedApiaryPrice = apiaryPrice;
 
         // M-NEW-02 Fix: Check price deviation from reference if reference is set
         if (referencePrice > 0 && maxPriceDeviation > 0) {
@@ -894,12 +943,47 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Get current bond price in HONEY
+     * @notice Get current bond price in HONEY (updates oracle state)
+     * @dev MEDIUM-03 Fix: Restricted to onlyOwner since it modifies oracle state.
+     *      For read-only price queries, use bondPriceInHoneyView() instead.
      * @return Current discounted bond price
      */
-    function bondPriceInHoney() external returns (uint256) {
+    function bondPriceInHoney() external onlyOwner returns (uint256) {
         uint256 apiaryPrice = twap.consult(1e9);
         return getBondPrice(apiaryPrice);
+    }
+
+    /**
+     * @notice CRITICAL-01 Fix: Read-only estimate of bond value for UI display
+     * @dev Uses the last cached TWAP price from the most recent deposit() call.
+     *      This is an approximation — actual deposit price may differ slightly.
+     * @param _token Token address (should match principle)
+     * @param _amount Amount of tokens
+     * @return estimatedPayout Estimated APIARY payout amount
+     * @return estimatedPrice Estimated discounted price in HONEY
+     */
+    function quoteValue(
+        address _token,
+        uint256 _amount
+    ) external view returns (uint256 estimatedPayout, uint256 estimatedPrice) {
+        // Use last cached price from most recent deposit (no state change)
+        uint256 cachedPrice = lastCachedApiaryPrice;
+        if (cachedPrice == 0) return (0, 0);
+
+        if (isLiquidityBond) {
+            estimatedPayout = IApiaryBondingCalculator(bondCalculator).valuation(_token, _amount);
+        } else {
+            estimatedPayout = _amount.mulDiv(
+                10 ** IERC20Metadata(APIARY).decimals(),
+                10 ** IERC20Metadata(_token).decimals()
+            );
+        }
+
+        estimatedPrice = getBondPrice(cachedPrice);
+
+        if (estimatedPrice != 0) {
+            estimatedPayout = estimatedPayout.mulDiv(PRECISION, estimatedPrice);
+        }
     }
 
     /**

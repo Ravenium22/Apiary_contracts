@@ -23,10 +23,18 @@ contract ApiaryUniswapV2TwapOracle is IApiaryUniswapV2TwapOracle {
 
     FixedPoint.uq112x112 public price0Average;
 
+    /// @notice M-01 Fix: Number of full TWAP updates completed
+    uint256 public updateCount;
+    /// @notice M-01 Fix: Minimum real TWAP updates before oracle can be consulted
+    /// @dev MEDIUM-01 Fix: Increased from 2 to 3 to reduce bootstrap manipulation window
+    uint256 public constant MIN_UPDATES_REQUIRED = 3;
+
     error APIARY__ZERO_ADDRESS();
     error APIARY__NO_RESERVES();
     error APIARY__ORACLE_NOT_INITIALIZED();
     error APIARY__ORACLE_STALE();
+    /// @notice M-01 Fix: Oracle needs more TWAP updates before it's reliable
+    error APIARY__ORACLE_NOT_READY();
 
     constructor(address _apiaryHoneyPair) {
         if (_apiaryHoneyPair == address(0)) revert APIARY__ZERO_ADDRESS();
@@ -63,6 +71,9 @@ contract ApiaryUniswapV2TwapOracle is IApiaryUniswapV2TwapOracle {
 
         price0CumulativeLast = price0Cumulative;
         blockTimestampLast = blockTimestamp;
+
+        // M-01 Fix: Increment update count after real TWAP calculation (not bootstrap)
+        updateCount++;
     }
 
     function consult(uint256 amountIn) external returns (uint256 amountOut) {
@@ -70,6 +81,9 @@ contract ApiaryUniswapV2TwapOracle is IApiaryUniswapV2TwapOracle {
 
         // C-01 Fix: Ensure oracle has been updated at least once with real TWAP data
         if (price0Average._x == 0) revert APIARY__ORACLE_NOT_INITIALIZED();
+
+        // M-01 Fix: Require multiple TWAP updates to prevent spot price manipulation at bootstrap
+        if (updateCount < MIN_UPDATES_REQUIRED) revert APIARY__ORACLE_NOT_READY();
         
         // C-01 Fix: Ensure we're not using stale data (max 2 hours old)
         if (block.timestamp - blockTimestampLast > 2 hours) revert APIARY__ORACLE_STALE();

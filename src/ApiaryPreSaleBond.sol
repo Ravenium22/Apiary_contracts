@@ -112,6 +112,10 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
     /// @dev Can be disabled by admin if needed
     bool public isWhitelistEnabled;
 
+    /// @notice HIGH-03 Fix: Total APIARY claimed/unlocked by all users
+    /// @dev Used in clawBack() to accurately calculate unredeemed obligations
+    uint128 public totalClaimedByUsers;
+
     /// @notice User bond information
     mapping(address userAddress => InvestorBondInfo userInfo) private _investorAllocations;
 
@@ -253,35 +257,27 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
             revert APIARY__SLIPPAGE_EXCEEDED();
         }
 
-        uint256 honeyToRefund;
-
         // If user already has allocation, unlock vested tokens first
+        // C-01 Fix: Call internal version to avoid nested nonReentrant
         if (_investorAllocations[msg.sender].totalAmount != 0) {
-            unlockApiary();
+            _unlockApiaryInternal();
         }
 
+        // LOW-04 Fix: Apply caps sequentially, calculate refund once at the end
         // Cap purchase at available APIARY
-        if (apiaryPurchaseAmount >= apiaryAvailable) {
+        if (apiaryPurchaseAmount > apiaryAvailable) {
             apiaryPurchaseAmount = apiaryAvailable;
-
-            // Calculate HONEY value of available APIARY
-            uint256 valueOfApiaryAvailable = apiaryPurchaseAmount.mulDiv(
-                tokenPrice,
-                PRECISION_APIARY,
-                Math.Rounding.Ceil
-            );
-
-            honeyToRefund = honeyAmount - valueOfApiaryAvailable;
         }
 
         // Cap purchase at user's remaining allocation
-        if (_investorAllocations[msg.sender].totalAmount + apiaryPurchaseAmount > bondPurchaseLimit) {
-            apiaryPurchaseAmount = bondPurchaseLimit - _investorAllocations[msg.sender].totalAmount;
-
-            honeyToRefund = honeyAmount - (
-                apiaryPurchaseAmount.mulDiv(tokenPrice, PRECISION_APIARY, Math.Rounding.Floor)
-            );
+        uint256 remainingAllocation = bondPurchaseLimit - _investorAllocations[msg.sender].totalAmount;
+        if (apiaryPurchaseAmount > remainingAllocation) {
+            apiaryPurchaseAmount = remainingAllocation;
         }
+
+        // Single refund calculation based on final capped amount
+        uint256 actualHoneyCost = apiaryPurchaseAmount.mulDiv(tokenPrice, PRECISION_APIARY, Math.Rounding.Ceil);
+        uint256 honeyToRefund = honeyAmount > actualHoneyCost ? honeyAmount - actualHoneyCost : 0;
 
         // Update HONEY amount after refund calculation
         honeyAmount -= honeyToRefund;
@@ -300,13 +296,14 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
         _investorAllocations[msg.sender].totalAmount += SafeCast.toUint128(apiaryPurchaseAmount);
 
         // Update global counters
-        totalBondsSold += uint128(apiaryPurchaseAmount);
-        totalHoneyRaised += uint128(honeyAmount);
+        // M-06 Fix: Use SafeCast consistently to prevent silent truncation
+        totalBondsSold += SafeCast.toUint128(apiaryPurchaseAmount);
+        totalHoneyRaised += SafeCast.toUint128(honeyAmount);
 
         // Transfer HONEY to treasury immediately
         honey.safeTransfer(treasury, honeyAmount);
 
-        emit ApiaryPurchased(msg.sender, uint128(apiaryPurchaseAmount), uint128(honeyAmount));
+        emit ApiaryPurchased(msg.sender, SafeCast.toUint128(apiaryPurchaseAmount), SafeCast.toUint128(honeyAmount));
     }
 
     /**
@@ -319,11 +316,19 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
      * - Otherwise: (totalAmount × timeSinceTGE) / vestingDuration
      */
     function unlockApiary() public whenNotPaused nonReentrant {
+        _unlockApiaryInternal();
+    }
+
+    /**
+     * @notice Internal unlock logic (no nonReentrant modifier)
+     * @dev C-01 Fix: Extracted to avoid nested nonReentrant when called from purchaseApiary()
+     */
+    function _unlockApiaryInternal() internal {
         // C-03 Fix: Ensure apiaryToken is set before attempting transfer
         if (address(apiaryToken) == address(0)) {
             revert APIARY__TOKEN_NOT_SET();
         }
-        
+
         InvestorBondInfo storage investorInfo = _investorAllocations[msg.sender];
 
         if (investorInfo.totalAmount == 0) {
@@ -336,6 +341,9 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
         }
 
         investorInfo.unlockedAmount += SafeCast.toUint128(releasableApiary);
+
+        // HIGH-03 Fix: Track total claimed across all users for accurate clawBack protection
+        totalClaimedByUsers += SafeCast.toUint128(releasableApiary);
 
         apiaryToken.safeTransfer(msg.sender, releasableApiary);
 
@@ -489,19 +497,18 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
     }
 
     /**
-     * @notice Emergency token/ETH recovery
-     * @param token Token address (or address(0) for ETH)
+     * @notice Emergency token recovery
+     * @dev L-04 Fix: Removed dead ETH handling code (contract has no receive/fallback)
+     * @param token Token address
      * @param amount Amount to recover
      */
     function clawBack(address token, uint256 amount) external onlyOwner {
-        if (address(this).balance != 0) {
-            payable(msg.sender).transfer(address(this).balance);
-        }
-
         if (token != address(0)) {
-            // C-05 Fix: Protect user's vested APIARY tokens from being withdrawn
+            // C-05 Fix + HIGH-03 Fix: Protect only unredeemed APIARY from being withdrawn
+            // Uses actual unredeemed amount (totalBondsSold - totalClaimedByUsers)
+            // instead of totalBondsSold which overstates obligations after claims
             if (token == address(apiaryToken) && address(apiaryToken) != address(0)) {
-                uint256 userAllocated = totalBondsSold;
+                uint256 userAllocated = totalBondsSold - totalClaimedByUsers;
                 uint256 contractBalance = IERC20(token).balanceOf(address(this));
                 uint256 excess = contractBalance > userAllocated ? contractBalance - userAllocated : 0;
                 if (amount > excess) {
