@@ -427,9 +427,12 @@ contract ApiaryTokenTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_UpdateLastStakedTime_Success() public {
-        // Set staking contract
+        // L-06 Fix: Two-step pattern for setting staking contract
         vm.prank(admin);
         token.setStaking(stakingContract);
+
+        vm.prank(stakingContract);
+        token.acceptStaking();
 
         // Update staked time
         vm.prank(stakingContract);
@@ -439,12 +442,17 @@ contract ApiaryTokenTest is Test {
     }
 
     function testRevert_UpdateLastStakedTime_NotStaking() public {
+        // L-06 Fix: Two-step pattern for setting staking contract
         vm.prank(admin);
         token.setStaking(stakingContract);
 
+        vm.prank(stakingContract);
+        token.acceptStaking();
+
         vm.startPrank(attacker);
 
-        vm.expectRevert("VaultOwned: caller is not the Staking");
+        // LOW-02 Fix: Now uses custom error instead of require string
+        vm.expectRevert(abi.encodeWithSignature("VAULT_OWNED__NOT_STAKING()"));
         token.updateLastStakedTime(user1);
 
         vm.stopPrank();
@@ -457,15 +465,23 @@ contract ApiaryTokenTest is Test {
     function test_SetVault() public {
         address vault = makeAddr("vault");
 
+        // L-06 Fix: Two-step pattern — set pending, then accept
         vm.prank(admin);
         token.setVault(vault);
+
+        vm.prank(vault);
+        token.acceptVault();
 
         assertEq(token.vault(), vault);
     }
 
     function test_SetStaking() public {
+        // L-06 Fix: Two-step pattern — set pending, then accept
         vm.prank(admin);
         token.setStaking(stakingContract);
+
+        vm.prank(stakingContract);
+        token.acceptStaking();
 
         assertEq(token.staking(), stakingContract);
     }
@@ -473,8 +489,12 @@ contract ApiaryTokenTest is Test {
     function test_SetLockUp() public {
         address lockup = makeAddr("lockup");
 
+        // L-06 Fix: Two-step pattern — set pending, then accept
         vm.prank(admin);
         token.setLockUp(lockup);
+
+        vm.prank(lockup);
+        token.acceptLockUp();
 
         assertEq(token.lockUp(), lockup);
     }

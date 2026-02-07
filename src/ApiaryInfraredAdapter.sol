@@ -11,19 +11,19 @@ import { IInfrared } from "./interfaces/IInfrared.sol";
 /**
  * @title ApiaryInfraredAdapter
  * @author Apiary Protocol
- * @notice Adapter contract for integrating Apiary with Infrared liquid staking
- * @dev Enables YieldManager to stake iBGT on Infrared and earn yield
- * 
+ * @notice Adapter contract for integrating Apiary with Infrared InfraredVault (MultiRewards)
+ * @dev Enables YieldManager to stake iBGT on Infrared and earn multi-token yield
+ *
  * FLOW:
  * 1. YieldManager approves this adapter for iBGT
  * 2. YieldManager calls stake() - adapter pulls iBGT, stakes on Infrared
- * 3. YieldManager calls claimRewards() - adapter claims and returns rewards
+ * 3. YieldManager calls claimRewards() - adapter claims all reward tokens and returns them
  * 4. YieldManager calls unstake() - adapter unstakes and returns iBGT
- * 
+ *
  * ACCESS CONTROL:
  * - YieldManager: stake/unstake/claimRewards (operational)
  * - Owner: admin functions, emergency actions
- * 
+ *
  * SECURITY:
  * - Pull pattern: Adapter pulls tokens from YieldManager (requires approval)
  * - Atomic operations: Each function reverts on failure
@@ -38,7 +38,7 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
                         CONSTANTS AND IMMUTABLES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Infrared staking contract
+    /// @notice Infrared vault contract (MultiRewards-based)
     IInfrared public immutable infrared;
 
     /// @notice iBGT token (staked BGT)
@@ -54,8 +54,8 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Total iBGT staked through this adapter (tracking)
     uint256 public totalStaked;
 
-    /// @notice Total rewards claimed (tracking)
-    uint256 public totalRewardsClaimed;
+    /// @notice Total rewards claimed per token (tracking)
+    mapping(address => uint256) public totalRewardsClaimedPerToken;
 
     /// @notice Minimum stake amount (prevents dust)
     uint256 public minStakeAmount;
@@ -72,11 +72,9 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__ONLY_YIELD_MANAGER();
     error APIARY__INSUFFICIENT_STAKED();
     error APIARY__INSUFFICIENT_BALANCE();
-    error APIARY__NO_REWARDS();
     error APIARY__BELOW_MINIMUM();
     error APIARY__STAKE_FAILED();
     error APIARY__UNSTAKE_FAILED();
-    error APIARY__CLAIM_FAILED();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -88,7 +86,7 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Emitted when iBGT is unstaked from Infrared
     event Unstaked(uint256 amountRequested, uint256 amountReceived);
 
-    /// @notice Emitted when rewards are claimed
+    /// @notice Emitted when rewards are claimed (per token)
     event RewardsClaimed(address indexed rewardToken, uint256 amount);
 
     /// @notice Emitted when yield manager is updated
@@ -124,7 +122,7 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
 
     /**
      * @notice Initialize the Infrared adapter
-     * @param _infrared Infrared staking contract address
+     * @param _infrared Infrared vault contract address (InfraredVault)
      * @param _ibgt iBGT token address
      * @param _yieldManager Yield manager address (can stake/unstake)
      * @param _admin Owner address
@@ -156,20 +154,12 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /*//////////////////////////////////////////////////////////////
-                            YIELD MANAGER FUNCTIONS
+                        YIELD MANAGER FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /**
      * @notice Stake iBGT on Infrared
      * @dev Only callable by yield manager. Uses pull pattern - YieldManager must approve adapter.
-     * 
-     * Flow:
-     * 1. Pull iBGT from YieldManager (caller)
-     * 2. Approve Infrared (if needed)
-     * 3. Stake iBGT on Infrared
-     * 4. Verify stake succeeded
-     * 5. Update tracking
-     * 
      * @param amount Amount of iBGT to stake
      * @return stakedAmount Actual amount staked (verified)
      */
@@ -190,7 +180,7 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
         // 3. Get staked balance before
         uint256 stakedBefore = _getStakedBalance();
 
-        // 4. Stake on Infrared
+        // 4. Stake on Infrared (no return value in real InfraredVault)
         infrared.stake(amount);
 
         // 5. Get staked balance after and verify
@@ -210,14 +200,6 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     /**
      * @notice Unstake iBGT from Infrared
      * @dev Only callable by yield manager. Returns iBGT to caller.
-     * 
-     * Flow:
-     * 1. Verify sufficient staked balance
-     * 2. Unstake from Infrared
-     * 3. Verify iBGT received
-     * 4. Transfer iBGT to YieldManager (caller)
-     * 5. Update tracking
-     * 
      * @param amount Amount of iBGT to unstake
      * @return unstakedAmount Actual amount received (may differ due to fees)
      */
@@ -235,8 +217,8 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
         // 1. Get iBGT balance before
         uint256 balanceBefore = ibgt.balanceOf(address(this));
 
-        // 2. Unstake from Infrared
-        infrared.unstake(amount);
+        // 2. Withdraw from Infrared (uses withdraw instead of unstake)
+        infrared.withdraw(amount);
 
         // 3. Get iBGT balance after
         uint256 balanceAfter = ibgt.balanceOf(address(this));
@@ -256,42 +238,41 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Claim pending rewards from Infrared
-     * @dev Only callable by yield manager. Returns rewards to caller.
-     * Simplified: No auto-compound - YieldManager decides what to do with rewards.
-     * 
-     * Flow:
-     * 1. Get reward token from Infrared
-     * 2. Get balance before
-     * 3. Claim from Infrared
-     * 4. Verify rewards received
-     * 5. Transfer rewards to YieldManager (caller)
-     * 
-     * @return rewardAmount Amount of rewards claimed
+     * @notice Claim pending rewards from Infrared (all reward tokens)
+     * @dev Only callable by yield manager. Returns all reward tokens to caller.
+     *      Infrared's getReward() claims all reward tokens at once.
+     * @return rewardTokens Array of reward token addresses
+     * @return rewardAmounts Array of amounts claimed per token
      */
-    function claimRewards() external onlyYieldManager whenNotPaused nonReentrant returns (uint256 rewardAmount) {
-        // 1. Get reward token from Infrared
-        address rewardToken = infrared.rewardToken();
+    function claimRewards() external onlyYieldManager whenNotPaused nonReentrant returns (
+        address[] memory rewardTokens,
+        uint256[] memory rewardAmounts
+    ) {
+        // 1. Get all reward tokens from Infrared
+        rewardTokens = infrared.getAllRewardTokens();
+        uint256 length = rewardTokens.length;
+        rewardAmounts = new uint256[](length);
 
-        // 2. Get balance before
-        uint256 balanceBefore = IERC20(rewardToken).balanceOf(address(this));
-
-        // 3. Claim from Infrared
-        infrared.claimRewards();
-
-        // 4. Get balance after
-        uint256 balanceAfter = IERC20(rewardToken).balanceOf(address(this));
-        rewardAmount = balanceAfter - balanceBefore;
-
-        // 5. Update tracking
-        totalRewardsClaimed += rewardAmount;
-
-        // 6. Transfer rewards to YieldManager (caller) if any
-        if (rewardAmount > 0) {
-            IERC20(rewardToken).safeTransfer(msg.sender, rewardAmount);
+        // 2. Snapshot balances before claiming
+        uint256[] memory balancesBefore = new uint256[](length);
+        for (uint256 i = 0; i < length; i++) {
+            balancesBefore[i] = IERC20(rewardTokens[i]).balanceOf(address(this));
         }
 
-        emit RewardsClaimed(rewardToken, rewardAmount);
+        // 3. Claim all rewards from Infrared
+        infrared.getReward();
+
+        // 4. Calculate claimed amounts and transfer to YieldManager
+        for (uint256 i = 0; i < length; i++) {
+            uint256 balanceAfter = IERC20(rewardTokens[i]).balanceOf(address(this));
+            rewardAmounts[i] = balanceAfter - balancesBefore[i];
+
+            if (rewardAmounts[i] > 0) {
+                totalRewardsClaimedPerToken[rewardTokens[i]] += rewardAmounts[i];
+                IERC20(rewardTokens[i]).safeTransfer(msg.sender, rewardAmounts[i]);
+                emit RewardsClaimed(rewardTokens[i], rewardAmounts[i]);
+            }
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -320,7 +301,7 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
      * @return Staked iBGT balance
      */
     function _getStakedBalance() internal view returns (uint256) {
-        return infrared.stakedBalance(address(this));
+        return infrared.balanceOf(address(this));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -396,24 +377,31 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
 
     /**
      * @notice Emergency withdraw all staked iBGT
-     * @dev Uses Infrared's emergency withdraw (may incur penalty). Sends to owner.
+     * @dev Uses Infrared's exit() which withdraws all and claims rewards. Sends to owner.
      */
     function emergencyUnstakeAll() external onlyOwner {
-        uint256 stakedBal = infrared.stakedBalance(address(this));
+        uint256 stakedBal = infrared.balanceOf(address(this));
 
         if (stakedBal == 0) {
             revert APIARY__INSUFFICIENT_STAKED();
         }
 
-        // Emergency withdraw from Infrared
-        infrared.emergencyWithdraw();
+        // Emergency exit from Infrared (withdraws all + claims all rewards)
+        infrared.exit();
 
-        // Get iBGT balance after withdraw
+        // Transfer all iBGT to owner
         uint256 ibgtBalance = ibgt.balanceOf(address(this));
-
-        // Transfer to owner
         if (ibgtBalance > 0) {
             ibgt.safeTransfer(msg.sender, ibgtBalance);
+        }
+
+        // Transfer any reward tokens to owner
+        address[] memory rewardTokens = infrared.getAllRewardTokens();
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            uint256 rewardBal = IERC20(rewardTokens[i]).balanceOf(address(this));
+            if (rewardBal > 0) {
+                IERC20(rewardTokens[i]).safeTransfer(msg.sender, rewardBal);
+            }
         }
 
         // Reset total staked
@@ -452,11 +440,18 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Get pending rewards for this adapter
-     * @return Amount of pending rewards
+     * @notice Get pending rewards for this adapter across all reward tokens
+     * @return rewardTokens Array of reward token addresses
+     * @return amounts Array of pending reward amounts
      */
-    function pendingRewards() external view returns (uint256) {
-        return infrared.pendingRewards(address(this));
+    function pendingRewards() external view returns (address[] memory rewardTokens, uint256[] memory amounts) {
+        rewardTokens = infrared.getAllRewardTokens();
+        uint256 length = rewardTokens.length;
+        amounts = new uint256[](length);
+
+        for (uint256 i = 0; i < length; i++) {
+            amounts[i] = infrared.earned(address(this), rewardTokens[i]);
+        }
     }
 
     /**
@@ -476,61 +471,36 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Get shares balance on Infrared
-     * @return Amount of shares owned
-     */
-    function sharesBalance() external view returns (uint256) {
-        return infrared.sharesOf(address(this));
-    }
-
-    /**
-     * @notice Get stake information from Infrared
-     * @return StakeInfo struct with staking details
-     */
-    function getStakeInfo() external view returns (IInfrared.StakeInfo memory) {
-        return infrared.getStakeInfo(address(this));
-    }
-
-    /**
-     * @notice Get Infrared protocol info
-     * @return ibgtToken iBGT token address
-     * @return rewardTokenAddress Reward token address
-     * @return totalStakedInProtocol Total iBGT staked in Infrared
-     * @return lockupPeriod Lockup duration (0 if none)
-     * @return unstakeFee Unstake fee in basis points
+     * @notice Get Infrared vault info
+     * @return stakingTokenAddress The staking token address
+     * @return totalStakedInVault Total staked in the Infrared vault
+     * @return rewardTokenAddresses All reward token addresses
      */
     function getInfraredInfo() external view returns (
-        address ibgtToken,
-        address rewardTokenAddress,
-        uint256 totalStakedInProtocol,
-        uint256 lockupPeriod,
-        uint256 unstakeFee
+        address stakingTokenAddress,
+        uint256 totalStakedInVault,
+        address[] memory rewardTokenAddresses
     ) {
-        ibgtToken = address(ibgt);
-        rewardTokenAddress = infrared.rewardToken();
-        totalStakedInProtocol = infrared.totalStaked();
-        lockupPeriod = infrared.lockupPeriod();
-        unstakeFee = infrared.unstakeFee();
+        stakingTokenAddress = infrared.stakingToken();
+        totalStakedInVault = infrared.totalSupply();
+        rewardTokenAddresses = infrared.getAllRewardTokens();
     }
 
     /**
      * @notice Get adapter configuration
      * @return yieldManagerAddress Yield manager address
      * @return totalStakedAmount Total staked through adapter (tracking)
-     * @return totalRewards Total rewards claimed
      * @return minStake Minimum stake amount
      * @return minUnstake Minimum unstake amount
      */
     function getAdapterInfo() external view returns (
         address yieldManagerAddress,
         uint256 totalStakedAmount,
-        uint256 totalRewards,
         uint256 minStake,
         uint256 minUnstake
     ) {
         yieldManagerAddress = yieldManager;
         totalStakedAmount = totalStaked;
-        totalRewards = totalRewardsClaimed;
         minStake = minStakeAmount;
         minUnstake = minUnstakeAmount;
     }

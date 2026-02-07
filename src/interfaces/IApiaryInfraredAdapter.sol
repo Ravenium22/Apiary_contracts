@@ -4,13 +4,13 @@ pragma solidity 0.8.26;
 /**
  * @title IApiaryInfraredAdapter
  * @author Apiary Protocol
- * @notice Interface for the Apiary Infrared adapter
- * @dev Used by YieldManager to stake iBGT on Infrared and earn yield
- * 
+ * @notice Interface for the Apiary Infrared adapter (MultiRewards-based)
+ * @dev Used by YieldManager to stake iBGT on Infrared and earn multi-token yield
+ *
  * FLOW:
  * 1. YieldManager approves adapter for iBGT
  * 2. YieldManager calls stake() - adapter pulls iBGT, stakes on Infrared
- * 3. YieldManager calls claimRewards() - adapter claims and returns rewards
+ * 3. YieldManager calls claimRewards() - adapter claims all reward tokens and returns them
  * 4. YieldManager calls unstake() - adapter unstakes and returns iBGT
  */
 interface IApiaryInfraredAdapter {
@@ -35,21 +35,23 @@ interface IApiaryInfraredAdapter {
     function unstake(uint256 amount) external returns (uint256 unstakedAmount);
 
     /**
-     * @notice Claim pending rewards from Infrared
-     * @dev Returns rewards to caller (YieldManager)
-     * @return rewardAmount Amount of rewards claimed and transferred
+     * @notice Claim pending rewards from Infrared (all reward tokens)
+     * @dev Returns all reward tokens to caller (YieldManager)
+     * @return rewardTokens Array of reward token addresses
+     * @return rewardAmounts Array of amounts claimed per token
      */
-    function claimRewards() external returns (uint256 rewardAmount);
+    function claimRewards() external returns (address[] memory rewardTokens, uint256[] memory rewardAmounts);
 
     /*//////////////////////////////////////////////////////////////
                             VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Get pending rewards for this adapter
-     * @return Amount of pending rewards from Infrared
+     * @notice Get pending rewards for this adapter across all reward tokens
+     * @return rewardTokens Array of reward token addresses
+     * @return amounts Array of pending reward amounts
      */
-    function pendingRewards() external view returns (uint256);
+    function pendingRewards() external view returns (address[] memory rewardTokens, uint256[] memory amounts);
 
     /**
      * @notice Get tracked total staked amount
@@ -58,10 +60,11 @@ interface IApiaryInfraredAdapter {
     function totalStaked() external view returns (uint256);
 
     /**
-     * @notice Get total rewards claimed historically
-     * @return Total rewards claimed
+     * @notice Get total rewards claimed for a specific token
+     * @param token Reward token address
+     * @return Total rewards claimed for that token
      */
-    function totalRewardsClaimed() external view returns (uint256);
+    function totalRewardsClaimedPerToken(address token) external view returns (uint256);
 
     /**
      * @notice Get actual staked balance from Infrared

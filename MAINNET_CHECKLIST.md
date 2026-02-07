@@ -1,13 +1,18 @@
 # Apiary Protocol - Mainnet Deployment Checklist
 
 **Date:** 2026-02-06
-**Status:** Pre-Mainnet
+**Status:** Pre-Mainnet — deployment scripts ready, pending external dependencies
 
 ---
 
-## 1. Remaining Audit Items
+## 1. Audit Fix Status
 
-### Unfixed Informational Findings
+### All Critical/High/Medium/Low Findings — FIXED
+
+All findings from the security audit have been applied to source contracts.
+Test suite updated and passing (412 pass, 0 fail).
+
+### Unfixed Informational Findings (Low Priority)
 
 | ID | Description | Impact | Action Needed |
 |---|---|---|---|
@@ -32,7 +37,49 @@
 
 ---
 
-## 2. Missing Implementations
+## 2. Deployment Script Tasks
+
+### Completed
+
+| ID | Task | Status |
+|---|---|---|
+| B-2 | Run full test suite, fix regressions from audit fixes | DONE — 14 test failures fixed (test-side), 412 pass |
+| B-3 | Remove hardcoded Bepolia addresses from DeployAll.s.sol | DONE — all 5 addresses + epoch + merkle root read from env vars |
+| B-4 | Fix YieldManager placeholder adapters (address(1)/address(2)) | DONE — setInfraredAdapter/setKodiakAdapter wired in DeployAll + 06_DeployYieldManager |
+| B-5 | Add `initializeBondTerms()` for ibgtBond and lpBond | DONE — Step 12 in DeployAll, env-driven with bounds checks |
+| B-6 | Add `preSaleBond.setApiaryToken(apiary)` | DONE — Step 13 in DeployAll |
+| B-7 | Add `apiary.setAllocationLimit()` for treasury/presale/bonds | DONE — Step 10 in DeployAll, env-driven defaults |
+| B-8 | Fix VerifyDeployment.s.sol self-contradicting checks | DONE — replaced with consistent post-deploy checks |
+| H-1 | Treasury config: setReserveToken, setLiquidityToken, setMaxMintRatio, setMaxMintPerDeposit | DONE — Step 11 in DeployAll + depositor roles fixed (LP Bond → liquidityDepositor) |
+| H-2 | Ownership transfer to multisig via Ownable2Step | DONE — Step 16 in DeployAll, transfers 9 contracts + grants APIARY admin role |
+| H-3 | YieldManager.setupApprovals() after adapters wired | DONE — Step 15 in DeployAll |
+| H-6 | Fix .env.example mismatch (BEPOLIA_RPC → BEPOLIA_RPC_URL) | DONE — .env.example fully rewritten with all env vars |
+| M-1 | sApiary.setIndex, yieldManager.setStakingContract | DONE — Step 14 in DeployAll |
+
+### DeployAll.s.sol — Full Step Summary
+
+| Step | Action | Env Vars Used |
+|---|---|---|
+| 1 | Deploy APIARY Token | — |
+| 2 | Deploy sAPIARY Token | — |
+| 3 | Set LP address (from env or placeholder) | `LP_PAIR_ADDRESS` |
+| 4 | Deploy Treasury | `IBGT_ADDRESS`, `HONEY_ADDRESS` |
+| 5 | Deploy Staking | `EPOCH_LENGTH`, `FIRST_EPOCH_NUMBER` |
+| 6 | Initialize sAPIARY with Staking | — |
+| 7 | Deploy TWAP Oracle (if LP exists) | — |
+| 8 | Deploy Bond Contracts + PreSale | `MERKLE_ROOT` |
+| 9 | Deploy YieldManager + Adapters, wire adapters | `INFRARED_STAKING`, `KODIAK_ROUTER`, `KODIAK_FACTORY` |
+| 10 | APIARY minting allocations (B-7) | `ALLOC_TREASURY`, `ALLOC_PRESALE`, `ALLOC_IBGT_BOND`, `ALLOC_LP_BOND` |
+| 11 | Treasury configuration (H-1) | `MAX_MINT_RATIO_BPS`, `MAX_MINT_PER_DEPOSIT` |
+| 12 | Initialize bond terms (B-5) | `BOND_VESTING_TERM`, `BOND_MAX_PAYOUT`, `BOND_DISCOUNT_RATE`, `BOND_MAX_DEBT` |
+| 13 | Set APIARY on PreSale (B-6) | — |
+| 14 | sApiary index + YM staking (M-1) | `SAPIARY_INITIAL_INDEX` |
+| 15 | YM approvals (H-3) | — |
+| 16 | Ownership transfer (H-2) | `MULTISIG_ADDRESS` |
+
+---
+
+## 3. Missing Implementations (Unchanged)
 
 ### ApiaryBondingCalculator — NO CONTRACT EXISTS
 
@@ -51,63 +98,38 @@
 
 ---
 
-## 3. Deployment Script Gaps
-
-### Hardcoded Testnet Addresses in `DeployAll.s.sol`
-
-The deployment script uses **Bepolia testnet addresses**. These MUST be updated for mainnet:
-
-```
-IBGT_ADDRESS    = 0x46eFC86F0D7455F135CC9df501673739d513E982  // Testnet iBGT
-HONEY_ADDRESS   = 0x7EeCA4205fF31f947EdBd49195a7A88E6A91161B  // Testnet HONEY
-INFRARED_STAKING = 0x75F3Be06b02E235E93Aa599F2fA6e44ed67B6C47  // Testnet Infrared
-KODIAK_ROUTER   = 0x496e305C03909ae382974cAcA4c580E1BF32afBE  // Testnet Router
-KODIAK_FACTORY  = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da  // Testnet Factory
-```
-
-### Placeholder Merkle Root
-
-```solidity
-bytes32 constant DEFAULT_MERKLE_ROOT = keccak256("APIARY_PRESALE_PLACEHOLDER");
-```
-
-This MUST be replaced with the real whitelist merkle root before starting the pre-sale.
-
-### Epoch Configuration
-
-Current testnet value: `EPOCH_LENGTH = 600` (10 minutes with ~1s blocks). Adjust for mainnet block times.
-
-### Missing Farm Addresses
-
-`script/utils/FindActiveFarms.s.sol` has a TODO: `"Add known farm addresses here after discovering them"`. Kodiak farm addresses must be registered after deployment.
-
----
-
 ## 4. Pre-Deployment Checklist
 
 ### Code
 
-- [ ] Commit all audit fix changes (10 modified files currently uncommitted)
-- [ ] Run full test suite: `forge test --gas-report`
-- [ ] Run coverage report: `forge coverage --report summary --skip script`
-- [ ] Verify all tests pass after audit modifications
-- [ ] Review that `ApiaryInfraredAdapter` works with real Infrared protocol
+- [x] Run full test suite — 412 tests pass, 0 failures
+- [x] Fix all test regressions from audit changes
+- [x] Deployment scripts produce ready-to-operate state
+- [x] VerifyDeployment.s.sol consistent and comprehensive
+- [ ] Commit all changes (10 modified src files + scripts + tests)
+- [ ] Run `forge test --gas-report` — verify gas within bounds
+- [ ] Run `forge coverage --report summary --skip script` — critical paths >90%
+- [ ] Verify `ApiaryInfraredAdapter` works with real Infrared protocol interface
 - [ ] Implement or source `ApiaryBondingCalculator` if LP bonds are needed at launch
 
 ### Configuration
 
-- [ ] Replace all Bepolia addresses with Berachain mainnet addresses (chain ID: 80094)
+- [x] All external addresses read from env vars (no hardcoded testnet addresses)
+- [x] Bond terms configurable via env with bounds checks
+- [x] Treasury safety limits configurable (maxMintRatio, maxMintPerDeposit)
+- [x] Mainnet safety: rejects placeholder merkle root + requires multisig on chain 80094
+- [ ] Obtain Berachain mainnet addresses for iBGT, HONEY, Infrared, Kodiak Router, Kodiak Factory
 - [ ] Generate production merkle root from final whitelist
-- [ ] Set appropriate epoch length for mainnet
-- [ ] Determine initial bond terms (vesting, max payout, discount, max debt)
-- [ ] Set `maxMintRatioBps` on Treasury (HIGH-01 fix parameter)
-- [ ] Set `maxMintPerDeposit` on Treasury
+- [ ] Determine production epoch length for mainnet
+- [ ] Determine production bond terms (vesting, payout, discount, debt)
 - [ ] Prepare `.env` file with mainnet RPC, deployer key, Berascan API key
 
 ### Security
 
 - [ ] Verify deployer wallet is a multisig or secure key management
-- [ ] Plan ownership transfer to multisig after deployment (Ownable2Step)
+- [ ] Confirm multisig address for `MULTISIG_ADDRESS` env var
+- [ ] After deployment: multisig calls `acceptOwnership()` on all 9 contracts
+- [ ] After deployment: deployer renounces `DEFAULT_ADMIN_ROLE` on APIARY token
 - [ ] Set keeper address for YieldManager (separate from owner for operational security)
 - [ ] Review all `onlyOwner` functions and ensure admin key security
 
@@ -115,42 +137,35 @@ Current testnet value: `EPOCH_LENGTH = 600` (10 minutes with ~1s blocks). Adjust
 
 ## 5. Post-Deployment Steps
 
-### Immediate (Before Operations Begin)
+### Immediate (Handled by DeployAll.s.sol)
+
+These are now automated in the deployment script:
+
+- [x] ~~sApiary.initialize(stakingAddress)~~ — Step 6
+- [x] ~~sApiary.setIndex(initialIndex)~~ — Step 14
+- [x] ~~Treasury: setReserveToken, setLiquidityToken, depositors, maxMintRatio, maxMintPerDeposit~~ — Step 11
+- [x] ~~APIARY: setAllocationLimit for treasury, presale, bonds~~ — Step 10
+- [x] ~~BondDepository: initializeBondTerms~~ — Step 12
+- [x] ~~PreSaleBond: setApiaryToken~~ — Step 13
+- [x] ~~YieldManager: setStakingContract, setupApprovals~~ — Steps 14-15
+- [x] ~~Ownership transfer to multisig~~ — Step 16
+
+### Manual Steps After Deployment
 
 1. **Create APIARY/HONEY LP pool** on Kodiak DEX
-2. **Deploy TWAP Oracle** with the LP pair address
-3. **Initialize sApiary:**
-   - Call `sApiary.initialize(stakingAddress)`
-   - Call `sApiary.setIndex(initialIndex)`
-4. **Configure Treasury:**
-   - Add reserve tokens: `toggleReserveToken(iBGT)`
-   - Add LP token: `toggleLiquidityToken(lpToken)`
-   - Set depositors: `toggleDepositor(bondDepository)`
-   - Set `maxMintPerDeposit` and `maxMintRatioBps`
-   - Set LP calculator if using LP bonds
-5. **Configure APIARY Token:**
-   - Set allocation limits for treasury, pre-sale
-   - Set vault, staking, lockUp addresses
-6. **Configure Bond Depository:**
-   - Call `initializeBondTerms(vestingTerm, maxPayout, discountRate, maxDebt)`
-   - Enable dynamic discounts if desired: `setDynamicDiscounts(true)`
-   - Set reference price for deviation protection
-7. **Configure YieldManager:**
-   - Register Kodiak farm: adapter `registerFarm(lpToken, farmAddress)`
-   - Set up approvals: `setupApprovals()`
-   - Set reward token: `setRewardToken(address)`
-   - Set staking contract: `setStakingContract(address)`
-8. **Configure Staking:**
-   - Set distributor: `setContract(DISTRIBUTOR, address)`
+2. **Deploy TWAP Oracle** with the LP pair address (or re-run DeployAll with `LP_PAIR_ADDRESS` set)
+3. **Register Kodiak farm:** run `08_ConfigureKodiakFarm.s.sol` after farm is created
+4. **Multisig accepts ownership** on all transferred contracts
+5. **Deployer renounces** APIARY `DEFAULT_ADMIN_ROLE`
+6. **Set YieldManager keeper** if different from owner
 
 ### Pre-Sale Launch
 
-1. Set real merkle root: `preSaleBond.setMerkleRoot(root)`
-2. Set APIARY token: `preSaleBond.setApiaryToken(address)`
-3. Start pre-sale: `preSaleBond.startPreSaleBond()`
-4. After pre-sale ends: `preSaleBond.endPreSaleBond()`
-5. Mint allocated tokens: `preSaleBond.mintApiary()`
-6. Start TGE: `preSaleBond.setTgeStartTime()`
+1. Set real merkle root: `preSaleBond.setMerkleRoot(root)` (or deploy with correct `MERKLE_ROOT` env var)
+2. Start pre-sale: `preSaleBond.startPreSaleBond()`
+3. After pre-sale ends: `preSaleBond.endPreSaleBond()`
+4. Mint allocated tokens: `preSaleBond.mintApiary()`
+5. Start TGE: `preSaleBond.setTgeStartTime()`
 
 ### Bond Launch
 
@@ -193,7 +208,7 @@ Current testnet value: `EPOCH_LENGTH = 600` (10 minutes with ~1s blocks). Adjust
 
 ## 7. Test Results Required Before Mainnet
 
-- [ ] `forge test` — all 410+ tests pass
+- [x] `forge test` — 412 tests pass, 0 fail, 5 skipped
 - [ ] `forge test --gas-report` — gas usage within acceptable bounds
 - [ ] `forge coverage` — critical paths have >90% coverage
 - [ ] Fork test against Berachain mainnet RPC (verify real Kodiak/Infrared integration)
@@ -210,4 +225,4 @@ Current testnet value: `EPOCH_LENGTH = 600` (10 minutes with ~1s blocks). Adjust
 | No BondingCalculator implementation | Medium | Only affects LP bonds; iBGT bonds work without it |
 | TWAP oracle bootstrap manipulation | Low | Fixed: requires 3 updates (~3 hours) before usable |
 | Uncommitted audit fixes | High | Commit, test, and verify all changes before deploy |
-| Admin key compromise | High | Transfer to multisig immediately after deployment |
+| Admin key compromise | High | Transfer to multisig automated in Step 16 |

@@ -470,6 +470,8 @@ contract ApiaryStakingTest is Test {
         // Move past epoch end
         vm.roll(firstEpochBlock + 1);
 
+        // HIGH-04 Fix: rebase() now restricted to owner/distributor
+        vm.prank(owner);
         staking.rebase();
 
         assertGt(sApiary.rebaseCount(), 0);
@@ -478,6 +480,7 @@ contract ApiaryStakingTest is Test {
     function test_Rebase_UpdatesEpochNumber() public {
         vm.roll(firstEpochBlock + 1);
 
+        vm.prank(owner);
         staking.rebase();
 
         (, uint256 number,,) = staking.epoch();
@@ -487,6 +490,7 @@ contract ApiaryStakingTest is Test {
     function test_Rebase_UpdatesEndBlock() public {
         vm.roll(firstEpochBlock + 1);
 
+        vm.prank(owner);
         staking.rebase();
 
         (,, uint256 endBlock,) = staking.epoch();
@@ -499,6 +503,7 @@ contract ApiaryStakingTest is Test {
 
         vm.roll(firstEpochBlock + 1);
 
+        vm.prank(owner);
         staking.rebase();
 
         assertGt(distributor.distributeCount(), 0);
@@ -510,6 +515,7 @@ contract ApiaryStakingTest is Test {
         vm.expectEmit(true, false, false, true);
         emit Rebased(FIRST_EPOCH_NUMBER + 1, 0); // distribute = 0 in Phase 1
 
+        vm.prank(owner);
         staking.rebase();
     }
 
@@ -518,6 +524,7 @@ contract ApiaryStakingTest is Test {
 
         uint256 rebaseCountBefore = sApiary.rebaseCount();
 
+        vm.prank(owner);
         staking.rebase();
 
         assertEq(sApiary.rebaseCount(), rebaseCountBefore);
@@ -538,6 +545,8 @@ contract ApiaryStakingTest is Test {
 
         vm.roll(firstEpochBlock + 1);
 
+        // HIGH-04 Fix: rebase() now restricted to owner/distributor
+        vm.prank(owner);
         staking.rebase();
 
         (,,, uint256 distribute) = staking.epoch();
@@ -552,6 +561,8 @@ contract ApiaryStakingTest is Test {
 
         vm.roll(firstEpochBlock + 1);
 
+        // HIGH-04 Fix: rebase() now restricted to owner/distributor
+        vm.prank(owner);
         staking.rebase();
 
         // Check that lastRebaseProfit was 0

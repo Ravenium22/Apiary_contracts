@@ -40,8 +40,6 @@ abstract contract ERC20Permit is ERC20, IERC2612Permit {
     uint256 private immutable INITIAL_CHAIN_ID;
     bytes32 private immutable INITIAL_DOMAIN_SEPARATOR;
 
-    bytes32 public DOMAIN_SEPARATOR;
-
     constructor() {
         uint256 chainID;
         assembly {
@@ -58,7 +56,11 @@ abstract contract ERC20Permit is ERC20, IERC2612Permit {
                 address(this)
             )
         );
-        DOMAIN_SEPARATOR = INITIAL_DOMAIN_SEPARATOR;
+    }
+
+    /// @notice INFO-03 Fix: Dynamic DOMAIN_SEPARATOR getter (recomputes after fork)
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        return _domainSeparator();
     }
 
     /// @notice M-02 Fix: Recompute DOMAIN_SEPARATOR if chain ID changed (fork protection)

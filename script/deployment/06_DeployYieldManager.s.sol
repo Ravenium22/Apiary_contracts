@@ -52,16 +52,16 @@ contract DeployYieldManager is Script {
     }
     
     function run() external returns (YieldAddresses memory) {
-        // Load environment variables
-        address apiary = vm.envAddress("APIARY_ADDRESS");
-        address honey = vm.envAddress("HONEY_ADDRESS");
-        address ibgt = vm.envAddress("IBGT_ADDRESS");
-        address treasury = vm.envAddress("TREASURY_ADDRESS");
-        address infraredStaking = vm.envAddress("INFRARED_STAKING");
-        address kodiakRouter = vm.envAddress("KODIAK_ROUTER");
-        address kodiakFactory = vm.envAddress("KODIAK_FACTORY");
-        address admin = vm.envAddress("DEPLOYER_ADDRESS");
-        
+        // Load and validate environment variables
+        address apiary = _requireEnvAddress("APIARY_ADDRESS");
+        address honey = _requireEnvAddress("HONEY_ADDRESS");
+        address ibgt = _requireEnvAddress("IBGT_ADDRESS");
+        address treasury = _requireEnvAddress("TREASURY_ADDRESS");
+        address infraredStaking = _requireEnvAddress("INFRARED_STAKING");
+        address kodiakRouter = _requireEnvAddress("KODIAK_ROUTER");
+        address kodiakFactory = _requireEnvAddress("KODIAK_FACTORY");
+        address admin = _requireEnvAddress("DEPLOYER_ADDRESS");
+
         console.log("=== Deploying Yield Manager & Adapters ===");
         console.log("APIARY:", apiary);
         console.log("HONEY:", honey);
@@ -119,7 +119,12 @@ contract DeployYieldManager is Script {
         );
         
         console.log("3. Kodiak Adapter deployed:", address(kodiakAdapter));
-        
+
+        // Step 4: Wire real adapters into Yield Manager (replaces address(1)/address(2) placeholders)
+        yieldManager.setInfraredAdapter(address(infraredAdapter));
+        yieldManager.setKodiakAdapter(address(kodiakAdapter));
+        console.log("4. Yield Manager adapters updated");
+
         vm.stopBroadcast();
         
         console.log("\n=== Yield Contracts Deployed ===");
@@ -155,7 +160,9 @@ contract DeployYieldManager is Script {
         require(address(yieldManager.ibgtToken()) == ibgt, "YM: iBGT not set");
         require(yieldManager.treasury() == treasury, "YM: Treasury not set");
         require(yieldManager.owner() == admin, "YM: Owner not set");
-        
+        require(yieldManager.infraredAdapter() == address(infraredAdapter), "YM: Infrared adapter not wired");
+        require(yieldManager.kodiakAdapter() == address(kodiakAdapter), "YM: Kodiak adapter not wired");
+
         require(address(infraredAdapter.ibgt()) == ibgt, "IA: iBGT not set");
         require(infraredAdapter.yieldManager() == address(yieldManager), "IA: YM not set");
         require(infraredAdapter.owner() == admin, "IA: Owner not set");
@@ -171,16 +178,23 @@ contract DeployYieldManager is Script {
         console.log(unicode"✓ Infrared Adapter verified");
         console.log(unicode"✓ Kodiak Adapter verified");
         console.log(unicode"✓ Default Phase 1 configuration set (25/25/50)");
-        console.log(unicode"\n⚠ CRITICAL Next steps:");
-        console.log("  1. Update Yield Manager with correct adapter addresses");
-        console.log("  2. Set yield manager in treasury");
-        console.log("  3. Set treasury as liquidity depositor");
-        console.log("  4. Approve token spending where needed");
+        console.log(unicode"\n⚠ Remaining steps:");
+        console.log("  1. Set yield manager in treasury");
+        console.log("  2. Set treasury as liquidity depositor");
+        console.log("  3. Approve token spending where needed");
         
         return YieldAddresses({
             yieldManager: address(yieldManager),
             infraredAdapter: address(infraredAdapter),
             kodiakAdapter: address(kodiakAdapter)
         });
+    }
+
+    /**
+     * @notice Read a required address env var, revert if missing or zero
+     */
+    function _requireEnvAddress(string memory name) internal view returns (address addr) {
+        addr = vm.envAddress(name);
+        require(addr != address(0), string.concat("DeployYieldManager: ", name, " is zero address"));
     }
 }

@@ -11,6 +11,7 @@ import {ApiaryPreSaleBond} from "../../src/ApiaryPreSaleBond.sol";
 import {ApiaryYieldManager} from "../../src/ApiaryYieldManager.sol";
 import {ApiaryInfraredAdapter} from "../../src/ApiaryInfraredAdapter.sol";
 import {ApiaryKodiakAdapter} from "../../src/ApiaryKodiakAdapter.sol";
+import {ApiaryBondingCalculator} from "../../src/ApiaryBondingCalculator.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
@@ -43,7 +44,8 @@ contract VerifyDeployment is Script {
     ApiaryYieldManager yieldManager;
     ApiaryInfraredAdapter infraredAdapter;
     ApiaryKodiakAdapter kodiakAdapter;
-    
+    ApiaryBondingCalculator bondingCalculator;
+
     // External tokens
     IERC20 ibgt;
     IERC20 honey;
@@ -97,7 +99,7 @@ contract VerifyDeployment is Script {
         
         apiary = ApiaryToken(vm.envAddress("APIARY_ADDRESS"));
         sApiaryToken = sApiary(vm.envAddress("SAPIARY_ADDRESS"));
-        staking = ApiaryStaking(vm.envAddress("STAKING_ADDRESS"));
+        staking = ApiaryStaking(payable(vm.envAddress("STAKING_ADDRESS")));
         treasury = ApiaryTreasury(vm.envAddress("TREASURY_ADDRESS"));
         ibgtBond = ApiaryBondDepository(vm.envAddress("IBGT_BOND_ADDRESS"));
         lpBond = ApiaryBondDepository(vm.envAddress("LP_BOND_ADDRESS"));
@@ -105,7 +107,8 @@ contract VerifyDeployment is Script {
         yieldManager = ApiaryYieldManager(vm.envAddress("YIELD_MANAGER_ADDRESS"));
         infraredAdapter = ApiaryInfraredAdapter(vm.envAddress("INFRARED_ADAPTER_ADDRESS"));
         kodiakAdapter = ApiaryKodiakAdapter(vm.envAddress("KODIAK_ADAPTER_ADDRESS"));
-        
+        bondingCalculator = ApiaryBondingCalculator(vm.envAddress("BONDING_CALCULATOR_ADDRESS"));
+
         ibgt = IERC20(vm.envAddress("IBGT_ADDRESS"));
         honey = IERC20(vm.envAddress("HONEY_ADDRESS"));
         apiaryHoneyLP = IERC20(vm.envAddress("APIARY_HONEY_LP"));
@@ -136,7 +139,8 @@ contract VerifyDeployment is Script {
         (uint256 length, uint256 number, uint256 endBlock, uint256 distribute) = staking.epoch();
         _check("Epoch length > 0", length > 0);
         _check("Epoch distribute = 0 (Phase 1)", distribute == 0);
-        
+        _check("sApiary index > 0", sApiaryToken.index() > 0);
+
         console.log("");
     }
     
@@ -156,7 +160,9 @@ contract VerifyDeployment is Script {
         _check("Yield Manager is depositor", treasury.isLiquidityDepositor(address(yieldManager)));
         
         _check("Treasury yield manager set", treasury.yieldManager() == address(yieldManager));
-        
+        _check("Treasury maxMintRatio > 0", treasury.maxMintRatioBps() > 0);
+        _check("Treasury maxMintPerDeposit > 0", treasury.maxMintPerDeposit() > 0);
+
         console.log("");
     }
     
@@ -174,10 +180,16 @@ contract VerifyDeployment is Script {
         _check("iBGT Bond discount set", ibgtDiscount > 0);
         _check("iBGT Bond max debt set", ibgtMaxDebt > 0);
         
+        // Bonding Calculator
+        _check("Bond Calculator APIARY", bondingCalculator.APIARY() == address(apiary));
+        _check("LP Bond calculator set", lpBond.bondCalculator() == address(bondingCalculator));
+        _check("Treasury LP calculator set", address(treasury.lpCalculator()) == address(bondingCalculator));
+
         // LP Bond
         _check("LP Bond APIARY", lpBond.APIARY() == address(apiary));
         _check("LP Bond principle", lpBond.principle() == address(apiaryHoneyLP));
         _check("LP Bond treasury", lpBond.treasury() == address(treasury));
+        _check("LP Bond is liquidity bond", lpBond.isLiquidityBond());
         
         (uint256 lpVesting, uint256 lpDiscount, uint256 lpMaxDebt) = _getBondTerms(lpBond);
         _check("LP Bond vesting set", lpVesting > 0);
@@ -203,7 +215,18 @@ contract VerifyDeployment is Script {
         
         _check("YM Infrared adapter", yieldManager.infraredAdapter() == address(infraredAdapter));
         _check("YM Kodiak adapter", yieldManager.kodiakAdapter() == address(kodiakAdapter));
+        // Guard against placeholder addresses left from deployment
+        _check("YM Infrared adapter not placeholder",
+            yieldManager.infraredAdapter() != address(0) &&
+            yieldManager.infraredAdapter() != address(1) &&
+            yieldManager.infraredAdapter() != address(2));
+        _check("YM Kodiak adapter not placeholder",
+            yieldManager.kodiakAdapter() != address(0) &&
+            yieldManager.kodiakAdapter() != address(1) &&
+            yieldManager.kodiakAdapter() != address(2));
         
+        _check("YM staking contract set", yieldManager.stakingContract() != address(0));
+
         ApiaryYieldManager.SplitConfig memory splitCfg = yieldManager.getSplitPercentages();
         uint256 total = splitCfg.toHoney + splitCfg.toApiaryLP + splitCfg.toBurn;
         _check("YM splits sum to 10000", total == 10000);
@@ -270,20 +293,23 @@ contract VerifyDeployment is Script {
     
     function _verifySanityChecks() internal {
         console.log("--- Sanity Checks ---");
-        
-        // Check that contracts are deployed
+
+        // Check that contracts are deployed (have code on-chain)
         uint256 apiarySize;
         assembly { apiarySize := extcodesize(sload(apiary.slot)) }
         _check("APIARY has code", apiarySize > 0);
-        
+
         uint256 sApiarySize;
         assembly { sApiarySize := extcodesize(sload(sApiaryToken.slot)) }
         _check("sAPIARY has code", sApiarySize > 0);
-        
-        // Check initial state
-        _check("APIARY total supply = 0", apiary.totalSupply() == 0);
-        _check("APIARY total minted = 0", apiary.totalMintedSupply() == 0);
-        
+
+        // Post-deployment state: constructor mints INITIAL_SUPPLY (200_000e9) to deployer.
+        // totalSupply and totalMintedSupply both reflect this initial mint.
+        // Verify the initial mint happened and no extra minting has occurred yet.
+        _check("APIARY totalSupply = initial supply",
+            apiary.totalSupply() == apiary.totalMintedSupply());
+        _check("APIARY no bonds sold yet", staking.totalStaked() == 0);
+
         console.log("");
     }
     

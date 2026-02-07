@@ -59,19 +59,19 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Individual bond information
-     * @param payout APIARY remaining to be paid
-     * @param pricePaid Price paid per APIARY in HONEY (for UI display)
+     * @notice Individual bond information (packed: 2 storage slots)
+     * @param payout APIARY remaining to be paid (uint128 max ≈ 3.4e29, safe for 9-decimal tokens)
+     * @param pricePaid Price paid per APIARY in HONEY (uint128 max ≈ 3.4e29, safe for 18-decimal prices)
      * @param vestingStart Block when bond was created
      * @param vestingEnd Block when bond is fully vested
      * @param redeemed Whether the bond has been fully redeemed
      */
     struct Bond {
-        uint256 payout;         // APIARY remaining to be paid
-        uint256 pricePaid;      // Price paid per APIARY in HONEY (for records)
-        uint48 vestingStart;    // Block when bond was created
-        uint48 vestingEnd;      // Block when fully vested
-        bool redeemed;          // Whether fully redeemed
+        uint128 payout;         // APIARY remaining to be paid (slot 1)
+        uint128 pricePaid;      // Price paid per APIARY in HONEY (slot 1)
+        uint48 vestingStart;    // Block when bond was created (slot 2)
+        uint48 vestingEnd;      // Block when fully vested (slot 2)
+        bool redeemed;          // Whether fully redeemed (slot 2)
     }
 
     /**
@@ -337,15 +337,16 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         payout = payOut;
 
         // C-02 Fix: Check user hasn't exceeded max bonds before creating new one
-        if (userBonds[msg.sender].length >= MAX_BONDS_PER_USER) {
+        Bond[] storage bonds = userBonds[msg.sender];
+        if (bonds.length >= MAX_BONDS_PER_USER) {
             revert APIARY__MAX_BONDS_EXCEEDED();
         }
 
         // Create new bond for user (push to array)
-        uint256 bondIndex = userBonds[msg.sender].length;
-        userBonds[msg.sender].push(Bond({
-            payout: payout,
-            pricePaid: discountedPriceInHoney,
+        uint256 bondIndex = bonds.length;
+        bonds.push(Bond({
+            payout: uint128(payout),
+            pricePaid: uint128(discountedPriceInHoney),
             vestingStart: uint48(block.number),
             vestingEnd: uint48(block.number + terms.vestingTerm),
             redeemed: false
@@ -390,8 +391,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
             emit BondRedeemed(msg.sender, bondIndex, payout, 0);
         } else {
             // Partially vested - pay proportionally
-            payout = bond.payout.mulDiv(percentVested, BPS);
-            bond.payout -= payout;
+            payout = uint256(bond.payout).mulDiv(percentVested, BPS);
+            bond.payout -= uint128(payout);
 
             emit BondRedeemed(msg.sender, bondIndex, payout, bond.payout);
         }
@@ -411,7 +412,7 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         Bond[] storage bonds = userBonds[msg.sender];
         uint256 length = bonds.length;
 
-        for (uint256 i = 0; i < length; i++) {
+        for (uint256 i = 0; i < length;) {
             if (bonds[i].payout > 0 && !bonds[i].redeemed) {
                 uint256 percentVested = _percentVestedFor(bonds[i]);
 
@@ -425,8 +426,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
                         bonds[i].redeemed = true;
                     } else {
                         // Partially vested
-                        payout = bonds[i].payout.mulDiv(percentVested, BPS);
-                        bonds[i].payout -= payout;
+                        payout = uint256(bonds[i].payout).mulDiv(percentVested, BPS);
+                        bonds[i].payout -= uint128(payout);
                     }
 
                     totalPayout += payout;
@@ -435,6 +436,7 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
                     emit BondRedeemed(msg.sender, i, payout, bonds[i].payout);
                 }
             }
+            unchecked { ++i; }
         }
 
         if (totalPayout == 0) revert APIARY__NOTHING_TO_REDEEM();
@@ -912,7 +914,7 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         for (uint256 i = 0; i < bonds.length; i++) {
             if (bonds[i].payout > 0 && !bonds[i].redeemed) {
                 uint256 percentVested = _percentVestedFor(bonds[i]);
-                totalPending_ += bonds[i].payout.mulDiv(percentVested, BPS);
+                totalPending_ += uint256(bonds[i].payout).mulDiv(percentVested, BPS);
             }
         }
     }
@@ -930,7 +932,7 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         if (bond.payout == 0 || bond.redeemed) return 0;
 
         uint256 percentVested = _percentVestedFor(bond);
-        pendingPayout_ = bond.payout.mulDiv(percentVested, BPS);
+        pendingPayout_ = uint256(bond.payout).mulDiv(percentVested, BPS);
     }
 
     /**

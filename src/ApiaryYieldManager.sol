@@ -341,12 +341,16 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         infraredAdapter = _infraredAdapter;
         kodiakAdapter = _kodiakAdapter;
 
-        // Phase 1 default configuration (25/25/50)
+        // Phase 1 split: 50% LP / 50% buy-and-burn
+        // toHoney (25%) + toApiaryLP (25%) = 50% total for LP creation (need both sides)
+        // toBurn (50%) = 50% swapped to APIARY and burned
+        // Note: toHoney is NOT a standalone HONEY allocation — it becomes the HONEY
+        //       half of the APIARY/HONEY LP pair. No HONEY goes to treasury in Phase 1.
         currentStrategy = Strategy.PHASE1_LP_BURN;
         splitConfig = SplitConfig({
-            toHoney: 2500, // 25% - swap to HONEY (will be paired with APIARY for LP)
-            toApiaryLP: 2500, // 25% - swap to APIARY (will be paired with HONEY for LP)
-            toBurn: 5000, // 50% - swap to APIARY and burn
+            toHoney: 2500, // 25% iBGT → HONEY (paired with APIARY for LP)
+            toApiaryLP: 2500, // 25% iBGT → APIARY (paired with HONEY for LP)
+            toBurn: 5000, // 50% iBGT → APIARY → burn
             toStakers: 0, // Not used in Phase 1
             toCompound: 0 // Not used in Phase 1
         });
@@ -479,9 +483,10 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
             return (0, 0, 0);
         }
 
-        // Calculate splits using BASIS_POINTS
-        uint256 toHoneyAmount = (totalYield * splitConfig.toHoney) / BASIS_POINTS;
-        uint256 toBurnAmount = (totalYield * splitConfig.toBurn) / BASIS_POINTS;
+        // Calculate splits using BASIS_POINTS (cache splitConfig in memory)
+        SplitConfig memory config = splitConfig;
+        uint256 toHoneyAmount = (totalYield * config.toHoney) / BASIS_POINTS;
+        uint256 toBurnAmount = (totalYield * config.toBurn) / BASIS_POINTS;
         uint256 toLPAmount = totalYield - toHoneyAmount - toBurnAmount;
 
         // 1. Swap 25% to HONEY (reverts on failure - atomic)
@@ -554,9 +559,10 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         }
 
         // Execute strategy based on current mode
+        SplitConfig memory cfg = splitConfig;
         if (currentMode == ProtocolMode.GROWTH) {
             // GROWTH mode: Compound iBGT (keep as reserves)
-            compounded = (totalYield * splitConfig.toCompound) / BASIS_POINTS;
+            compounded = (totalYield * cfg.toCompound) / BASIS_POINTS;
             ibgtToken.safeTransfer(treasury, compounded);
 
             // Remaining follows Phase 1 logic
@@ -568,7 +574,7 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
             apiaryBurned = _burnApiary(apiaryBought);
         } else {
             // NORMAL mode: Distribute to stakers + Phase 1 logic
-            uint256 toStakersAmount = (totalYield * splitConfig.toStakers) / BASIS_POINTS;
+            uint256 toStakersAmount = (totalYield * cfg.toStakers) / BASIS_POINTS;
             _distributeToStakers(toStakersAmount);
 
             // Remaining follows Phase 1 logic
@@ -646,58 +652,61 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
             revert APIARY__ADAPTER_NOT_SET();
         }
 
-        // Claim rewards from adapter
-        uint256 rewardsClaimed = IApiaryInfraredAdapter(infraredAdapter).claimRewards();
+        // Claim all reward tokens from adapter (MultiRewards returns multiple tokens)
+        (address[] memory rewardTokens, uint256[] memory rewardAmounts) =
+            IApiaryInfraredAdapter(infraredAdapter).claimRewards();
 
-        if (rewardsClaimed == 0) {
-            revert APIARY__CLAIM_FAILED();
+        // Process each reward token: if it's iBGT, add directly; otherwise swap to iBGT
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            if (rewardAmounts[i] == 0) continue;
+
+            if (rewardTokens[i] == address(ibgtToken)) {
+                // iBGT reward — add directly
+                claimedAmount += rewardAmounts[i];
+            } else {
+                // Non-iBGT reward — swap to iBGT via Kodiak
+                if (kodiakAdapter == address(0)) {
+                    revert APIARY__ADAPTER_NOT_SET();
+                }
+
+                IERC20(rewardTokens[i]).forceApprove(kodiakAdapter, rewardAmounts[i]);
+
+                // Try direct swap first
+                try IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
+                    rewardTokens[i],
+                    address(ibgtToken),
+                    rewardAmounts[i]
+                ) returns (uint256 expectedOut) {
+                    uint256 minOut = _calculateMinOutput(expectedOut);
+
+                    claimedAmount += IApiaryKodiakAdapter(kodiakAdapter).swap(
+                        rewardTokens[i],
+                        address(ibgtToken),
+                        rewardAmounts[i],
+                        minOut,
+                        address(this)
+                    );
+                } catch {
+                    // Direct swap failed — try through HONEY
+                    address[] memory path = new address[](3);
+                    path[0] = rewardTokens[i];
+                    path[1] = address(honeyToken);
+                    path[2] = address(ibgtToken);
+
+                    // M-04 Fix: Use emergency slippage tolerance instead of zero
+                    uint256 minOut = (rewardAmounts[i] * (BASIS_POINTS - emergencySlippageBps)) / BASIS_POINTS;
+                    claimedAmount += IApiaryKodiakAdapter(kodiakAdapter).swapMultiHop(
+                        path,
+                        rewardAmounts[i],
+                        minOut,
+                        address(this)
+                    );
+                }
+            }
         }
 
-        // If reward token is iBGT, we're done
-        if (rewardTokenIsIBGT || address(rewardToken) == address(0)) {
-            // Verify we received iBGT
-            claimedAmount = rewardsClaimed;
-        } else {
-            // Reward token is different - need to swap to iBGT
-            // Check if we have a path through HONEY
-            if (kodiakAdapter == address(0)) {
-                revert APIARY__ADAPTER_NOT_SET();
-            }
-
-            // Approve and swap reward token → iBGT
-            rewardToken.forceApprove(kodiakAdapter, rewardsClaimed);
-
-            // Try direct swap first
-            try IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
-                address(rewardToken),
-                address(ibgtToken),
-                rewardsClaimed
-            ) returns (uint256 expectedOut) {
-                uint256 minOut = _calculateMinOutput(expectedOut);
-                
-                claimedAmount = IApiaryKodiakAdapter(kodiakAdapter).swap(
-                    address(rewardToken),
-                    address(ibgtToken),
-                    rewardsClaimed,
-                    minOut,
-                    address(this)
-                );
-            } catch {
-                // Direct swap failed - try through HONEY
-                address[] memory path = new address[](3);
-                path[0] = address(rewardToken);
-                path[1] = address(honeyToken);
-                path[2] = address(ibgtToken);
-
-                // M-04 Fix: Use emergency slippage tolerance instead of zero
-                uint256 minOut = (rewardsClaimed * (BASIS_POINTS - emergencySlippageBps)) / BASIS_POINTS;
-                claimedAmount = IApiaryKodiakAdapter(kodiakAdapter).swapMultiHop(
-                    path,
-                    rewardsClaimed,
-                    minOut,
-                    address(this)
-                );
-            }
+        if (claimedAmount == 0) {
+            revert APIARY__CLAIM_FAILED();
         }
 
         // Verify minimum amount received
@@ -1188,7 +1197,10 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     function pendingYield() public view returns (uint256 pendingAmount) {
         if (infraredAdapter == address(0)) return 0;
 
-        pendingAmount = IApiaryInfraredAdapter(infraredAdapter).pendingRewards();
+        (, uint256[] memory amounts) = IApiaryInfraredAdapter(infraredAdapter).pendingRewards();
+        for (uint256 i = 0; i < amounts.length; i++) {
+            pendingAmount += amounts[i];
+        }
     }
 
     /**

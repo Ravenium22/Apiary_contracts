@@ -13,34 +13,48 @@ contract MockInfraredAdapterForYM {
     uint256 public pendingRewardsValue;
     uint256 public totalStaked;
     uint256 public totalRewardsClaimed;
-    
+    address public mockRewardToken;
+
     function setPendingRewards(uint256 value) external {
         pendingRewardsValue = value;
     }
-    
-    function pendingRewards() external view returns (uint256) {
-        return pendingRewardsValue;
+
+    function setMockRewardToken(address token) external {
+        mockRewardToken = token;
     }
-    
+
+    function pendingRewards() external view returns (address[] memory rewardTokens, uint256[] memory amounts) {
+        rewardTokens = new address[](1);
+        amounts = new uint256[](1);
+        rewardTokens[0] = mockRewardToken;
+        amounts[0] = pendingRewardsValue;
+    }
+
+    function totalRewardsClaimedPerToken(address) external view returns (uint256) {
+        return totalRewardsClaimed;
+    }
+
     function getStakedBalance() external view returns (uint256) {
         return totalStaked;
     }
-    
+
     function stake(uint256 amount) external returns (uint256) {
         totalStaked += amount;
         return amount;
     }
-    
+
     function unstake(uint256 amount) external returns (uint256) {
         totalStaked -= amount;
         return amount;
     }
-    
-    function claimRewards() external returns (uint256) {
-        uint256 rewards = pendingRewardsValue;
+
+    function claimRewards() external returns (address[] memory rewardTokens, uint256[] memory rewardAmounts) {
+        rewardTokens = new address[](1);
+        rewardAmounts = new uint256[](1);
+        rewardTokens[0] = mockRewardToken;
+        rewardAmounts[0] = pendingRewardsValue;
+        totalRewardsClaimed += pendingRewardsValue;
         pendingRewardsValue = 0;
-        totalRewardsClaimed += rewards;
-        return rewards;
     }
 }
 

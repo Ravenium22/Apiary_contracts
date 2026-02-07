@@ -573,10 +573,12 @@ contract ApiaryBondDepositoryTest is Test {
     }
 
     function test_Redeem_DecreasesTotalDebt() public {
+        // MEDIUM-05 Fix: redeem no longer directly subtracts from totalDebt.
+        // Debt now decays solely via _decayDebt() called during deposit().
         uint256 depositAmount = 10e18;
 
         vm.prank(user1);
-        uint256 payout = bondDepository.deposit(depositAmount, 1e18);
+        bondDepository.deposit(depositAmount, 1e18);
 
         uint256 debtBefore = bondDepository.totalDebt();
 
@@ -585,7 +587,8 @@ contract ApiaryBondDepositoryTest is Test {
         vm.prank(user1);
         bondDepository.redeem(0);
 
-        assertEq(bondDepository.totalDebt(), debtBefore - payout);
+        // totalDebt unchanged by redeem — only _decayDebt() reduces it
+        assertEq(bondDepository.totalDebt(), debtBefore);
     }
 
     function test_RedeemAll() public {
