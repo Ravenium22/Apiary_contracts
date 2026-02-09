@@ -12,19 +12,21 @@ import { IApiaryTreasury } from "./interfaces/IApiaryTreasury.sol";
 import { IApiaryToken } from "./interfaces/IApiaryToken.sol";
 import { IApiaryBondingCalculator } from "./interfaces/IApiaryBondingCalculator.sol";
 import { IApiaryUniswapV2TwapOracle } from "./interfaces/IApiaryUniswapV2TwapOracle.sol";
+import { IAggregatorV3 } from "./interfaces/IAggregatorV3.sol";
 
 /**
  * @title ApiaryBondDepository
  * @notice Enables APIARY bond purchases using iBGT or APIARY/HONEY LP tokens
  * @dev Bonds are priced using TWAP oracle with a manual discount rate
- *      Vesting occurs linearly over 5 days (configurable)
+ *      iBGT bonds use a Chainlink-compatible iBGT/USD oracle for correct valuation
+ *      Vesting occurs linearly over 7 days (configurable)
  *      Users can have multiple independent bonds, each with its own vesting schedule
- * 
+ *
  * Key Features:
- * - Primary principle: iBGT (Infrared BGT)
+ * - Primary principle: iBGT (Infrared BGT) — priced via iBGT/USD oracle
  * - Secondary principle: APIARY/HONEY LP from Kodiak
- * - TWAP-based pricing with discount
- * - Linear vesting over 5 days
+ * - TWAP-based APIARY pricing with discount
+ * - Linear vesting over 7 days
  * - Multiple bonds per user with independent vesting
  * - Slippage protection
  * - Debt and payout limits
@@ -46,7 +48,7 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
 
     /**
      * @notice Bond terms configuration
-     * @param vestingTerm Duration of vesting in blocks (5 days default)
+     * @param vestingTerm Duration of vesting in blocks (7 days default)
      * @param maxPayout Maximum payout as % of total allocation (in thousandths)
      * @param discountRate Discount from market price (in basis points)
      * @param maxDebt Maximum total debt allowed
@@ -99,8 +101,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     uint256 public constant MAX_DISCOUNT_RATE = 5000;
     
     // Berachain average block time: ~5 seconds
-    // 5 days = 5 * 24 * 60 * 60 / 5 = 86,400 blocks
-    uint256 public constant DEFAULT_VESTING_TERM = 86_400;
+    // 7 days = 7 * 24 * 60 * 60 / 5 = 120,960 blocks
+    uint256 public constant DEFAULT_VESTING_TERM = 120_960;
     
     // Minimum vesting term: 1 day = 17,280 blocks
     uint256 public constant MINIMUM_VESTING_TERM = 17_280;
@@ -165,6 +167,18 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice CRITICAL-01 Fix: Last TWAP price used during deposit, cached for view queries
     uint256 public lastCachedApiaryPrice;
 
+    /// @notice Chainlink-compatible iBGT/USD price feed (required for iBGT bonds)
+    IAggregatorV3 public ibgtPriceFeed;
+
+    /// @notice Cached decimals from iBGT price feed (avoids repeated external calls)
+    uint8 public ibgtPriceFeedDecimals;
+
+    /// @notice Maximum staleness of price feed data before revert (default: 1 hour)
+    uint256 public priceFeedStalenessThreshold;
+
+    /// @notice Last iBGT oracle price, cached for quoteValue() view function
+    uint256 public lastCachedIbgtPrice;
+
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -187,6 +201,10 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__MAX_BONDS_EXCEEDED();
     /// @notice M-NEW-02 Fix: Price deviation too high
     error APIARY__PRICE_DEVIATION_TOO_HIGH();
+    /// @notice iBGT price feed returned stale data
+    error APIARY__STALE_PRICE_FEED();
+    /// @notice iBGT price feed returned zero or negative price
+    error APIARY__INVALID_IBGT_PRICE();
     /// @notice M-NEW-02 Fix: Invalid price deviation parameter
     error APIARY__INVALID_PRICE_DEVIATION();
     /// @notice Bonds paused due to debt ratio exceeding 10%
@@ -227,6 +245,10 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     event MaxPriceDeviationUpdated(uint256 oldDeviation, uint256 newDeviation);
     /// @notice Emitted when dynamic discounts are toggled
     event DynamicDiscountsToggled(bool enabled);
+    /// @notice Emitted when iBGT price feed is updated
+    event IbgtPriceFeedUpdated(address indexed priceFeed);
+    /// @notice Emitted when price feed staleness threshold is updated
+    event PriceFeedStalenessThresholdUpdated(uint256 oldThreshold, uint256 newThreshold);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -240,6 +262,7 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
      * @param admin Admin address (owner)
      * @param _bondCalculator LP calculator (address(0) if not LP bond)
      * @param _twap TWAP oracle address
+     * @param _ibgtPriceFeed Chainlink iBGT/USD price feed (required for iBGT bonds, address(0) for LP bonds)
      */
     constructor(
         address _apiary,
@@ -247,7 +270,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         address _treasury,
         address admin,
         address _bondCalculator,
-        address _twap
+        address _twap,
+        address _ibgtPriceFeed
     ) Ownable(admin) {
         if (
             _apiary == address(0) ||
@@ -264,10 +288,24 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         twap = IApiaryUniswapV2TwapOracle(_twap);
         bondCalculator = _bondCalculator;
         isLiquidityBond = (_bondCalculator != address(0));
-        
+
+        // For iBGT bonds (non-LP), price feed is mandatory
+        if (!isLiquidityBond) {
+            if (_ibgtPriceFeed == address(0)) revert APIARY__ZERO_ADDRESS();
+            ibgtPriceFeed = IAggregatorV3(_ibgtPriceFeed);
+            ibgtPriceFeedDecimals = ibgtPriceFeed.decimals();
+        } else if (_ibgtPriceFeed != address(0)) {
+            // LP bonds can optionally have a price feed (ignored in pricing)
+            ibgtPriceFeed = IAggregatorV3(_ibgtPriceFeed);
+            ibgtPriceFeedDecimals = ibgtPriceFeed.decimals();
+        }
+
+        // Default staleness threshold: 1 hour
+        priceFeedStalenessThreshold = 3600;
+
         // L-03 Fix: Initialize blocksPerDay (86400 seconds / 5 seconds per block = 17280)
         blocksPerDay = 17_280;
-        
+
         // M-NEW-02 Fix: Initialize price deviation protection (20% max deviation)
         maxPriceDeviation = 2000; // 20% in basis points
     }
@@ -510,6 +548,28 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
+     * @notice Update iBGT/USD price feed
+     * @param _priceFeed New Chainlink-compatible price feed address
+     */
+    function setIbgtPriceFeed(address _priceFeed) external onlyOwner {
+        if (_priceFeed == address(0)) revert APIARY__ZERO_ADDRESS();
+        ibgtPriceFeed = IAggregatorV3(_priceFeed);
+        ibgtPriceFeedDecimals = ibgtPriceFeed.decimals();
+        emit IbgtPriceFeedUpdated(_priceFeed);
+    }
+
+    /**
+     * @notice Update staleness threshold for iBGT price feed
+     * @param _threshold Maximum age in seconds (e.g. 3600 = 1 hour)
+     */
+    function setPriceFeedStalenessThreshold(uint256 _threshold) external onlyOwner {
+        if (_threshold == 0) revert APIARY__INVALID_AMOUNT();
+        uint256 oldThreshold = priceFeedStalenessThreshold;
+        priceFeedStalenessThreshold = _threshold;
+        emit PriceFeedStalenessThresholdUpdated(oldThreshold, _threshold);
+    }
+
+    /**
      * @notice L-03 Fix: Update blocks per day for vesting calculations
      * @dev Adjust if Berachain block time changes from ~5 seconds
      * @param _blocksPerDay New blocks per day value
@@ -689,10 +749,11 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 activeCount = 0;
 
         // Count active bonds
-        for (uint256 i = 0; i < allBonds.length; i++) {
+        for (uint256 i = 0; i < allBonds.length;) {
             if (allBonds[i].payout > 0 && !allBonds[i].redeemed) {
                 activeCount++;
             }
+            unchecked { ++i; }
         }
 
         // Build arrays
@@ -700,12 +761,13 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         indices = new uint256[](activeCount);
         uint256 j = 0;
 
-        for (uint256 i = 0; i < allBonds.length; i++) {
+        for (uint256 i = 0; i < allBonds.length;) {
             if (allBonds[i].payout > 0 && !allBonds[i].redeemed) {
                 activeBonds[j] = allBonds[i];
                 indices[j] = i;
                 j++;
             }
+            unchecked { ++i; }
         }
     }
 
@@ -854,21 +916,32 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         }
 
         if (isLiquidityBond) {
-            // For LP bonds, use bonding calculator
+            // For LP bonds, use bonding calculator (returns HONEY-equivalent value in 9-dec)
             value_ = IApiaryBondingCalculator(bondCalculator).valuation(_token, _amount);
         } else {
-            // For iBGT bonds, convert to APIARY decimals
-            // Assuming iBGT has 18 decimals and APIARY has 9 decimals
-            value_ = _amount.mulDiv(
-                10 ** IERC20Metadata(APIARY).decimals(),
-                10 ** IERC20Metadata(_token).decimals()
-            );
+            // For iBGT bonds: price using iBGT/USD oracle (HONEY = $1 USD)
+            (, int256 answer,, uint256 updatedAt,) = ibgtPriceFeed.latestRoundData();
+            if (answer <= 0) revert APIARY__INVALID_IBGT_PRICE();
+            if (block.timestamp - updatedAt > priceFeedStalenessThreshold) revert APIARY__STALE_PRICE_FEED();
+
+            uint256 ibgtPrice = uint256(answer);
+            lastCachedIbgtPrice = ibgtPrice;
+
+            // Unit math (example: 10 iBGT at $3, 8-dec feed, APIARY 9-dec, iBGT 18-dec):
+            //   Step 1: 10e18 * 3e8 / 1e8 = 30e18  (USD value in 18-dec)
+            //   Step 2: 30e18 * 1e9 / 1e18 = 30e9   (USD value in 9-dec)
+            // Generalizes to any feed/token decimals. Result: HONEY-equivalent value in 9-dec.
+            value_ = _amount
+                .mulDiv(ibgtPrice, 10 ** ibgtPriceFeedDecimals)
+                .mulDiv(10 ** IERC20Metadata(APIARY).decimals(), 10 ** IERC20Metadata(_token).decimals());
         }
 
-        // Apply discount to get bond price
+        // Apply discount to get bond price: HONEY per APIARY after discount (18-dec)
         discountedPriceInHoney = getBondPrice(apiaryPrice);
 
-        // Calculate payout: value / discounted_price
+        // Convert HONEY-equivalent value (9-dec) to APIARY payout (9-dec):
+        //   payout = value_[9-dec] * 1e18 / discountedPrice[18-dec]
+        //   Example: 30e9 * 1e18 / 0.225e18 = 133.33e9 APIARY
         if (discountedPriceInHoney != 0) {
             value_ = value_.mulDiv(PRECISION, discountedPriceInHoney);
         }
@@ -911,11 +984,12 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     function pendingPayoutFor(address _user) external view returns (uint256 totalPending_) {
         Bond[] memory bonds = userBonds[_user];
 
-        for (uint256 i = 0; i < bonds.length; i++) {
+        for (uint256 i = 0; i < bonds.length;) {
             if (bonds[i].payout > 0 && !bonds[i].redeemed) {
                 uint256 percentVested = _percentVestedFor(bonds[i]);
                 totalPending_ += uint256(bonds[i].payout).mulDiv(percentVested, BPS);
             }
+            unchecked { ++i; }
         }
     }
 
@@ -975,12 +1049,17 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         if (isLiquidityBond) {
             estimatedPayout = IApiaryBondingCalculator(bondCalculator).valuation(_token, _amount);
         } else {
-            estimatedPayout = _amount.mulDiv(
-                10 ** IERC20Metadata(APIARY).decimals(),
-                10 ** IERC20Metadata(_token).decimals()
-            );
+            // Use cached iBGT price from last deposit for gas-free UI quotes
+            uint256 cachedIbgtPrice = lastCachedIbgtPrice;
+            if (cachedIbgtPrice == 0) return (0, 0);
+
+            // Same unit math as valueOf(): HONEY-equivalent value in 9-dec
+            estimatedPayout = _amount
+                .mulDiv(cachedIbgtPrice, 10 ** ibgtPriceFeedDecimals)
+                .mulDiv(10 ** IERC20Metadata(APIARY).decimals(), 10 ** IERC20Metadata(_token).decimals());
         }
 
+        // Convert HONEY-equivalent value (9-dec) to APIARY payout (9-dec)
         estimatedPrice = getBondPrice(cachedPrice);
 
         if (estimatedPrice != 0) {

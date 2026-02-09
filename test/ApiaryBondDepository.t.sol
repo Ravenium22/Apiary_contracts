@@ -129,12 +129,46 @@ contract MockTWAP {
     function update() external {}
 }
 
+contract MockAggregatorV3 {
+    int256 public price;
+    uint8 public immutable feedDecimals;
+    uint256 public updatedAt;
+
+    constructor(int256 _price, uint8 _decimals) {
+        price = _price;
+        feedDecimals = _decimals;
+        updatedAt = block.timestamp;
+    }
+
+    function decimals() external view returns (uint8) {
+        return feedDecimals;
+    }
+
+    function latestRoundData()
+        external
+        view
+        returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt_, uint80 answeredInRound)
+    {
+        return (1, price, block.timestamp, updatedAt, 1);
+    }
+
+    function setPrice(int256 _price) external {
+        price = _price;
+        updatedAt = block.timestamp;
+    }
+
+    function setUpdatedAt(uint256 _updatedAt) external {
+        updatedAt = _updatedAt;
+    }
+}
+
 contract ApiaryBondDepositoryTest is Test {
     ApiaryBondDepository public bondDepository;
     MockAPIARY public apiary;
     MockERC20 public ibgt;
     MockTreasury public treasury;
     MockTWAP public twap;
+    MockAggregatorV3 public ibgtPriceFeed;
 
     // Test accounts
     address public admin = makeAddr("admin");
@@ -143,7 +177,7 @@ contract ApiaryBondDepositoryTest is Test {
     address public attacker = makeAddr("attacker");
 
     // Bond terms
-    uint256 public constant VESTING_TERM = 86_400; // 5 days in blocks
+    uint256 public constant VESTING_TERM = 120_960; // 7 days in blocks
     uint256 public constant MAX_PAYOUT = 500; // 0.5% of allocation
     uint256 public constant DISCOUNT_RATE = 1000; // 10%
     uint256 public constant MAX_DEBT = 1_000_000e9; // 1M APIARY
@@ -185,6 +219,8 @@ contract ApiaryBondDepositoryTest is Test {
         ibgt = new MockERC20("Infrared BGT", "iBGT", 18);
         twap = new MockTWAP();
         treasury = new MockTreasury(address(apiary));
+        // iBGT at $1 USD, 8-decimal Chainlink feed
+        ibgtPriceFeed = new MockAggregatorV3(1e8, 8);
 
         // Deploy bond depository (non-LP bond)
         vm.prank(admin);
@@ -194,7 +230,8 @@ contract ApiaryBondDepositoryTest is Test {
             address(treasury),
             admin,
             address(0), // No bonding calculator (not LP bond)
-            address(twap)
+            address(twap),
+            address(ibgtPriceFeed)
         );
 
         // Setup: Give treasury allocation to mint
@@ -257,7 +294,8 @@ contract ApiaryBondDepositoryTest is Test {
             address(treasury),
             admin,
             address(0),
-            address(twap)
+            address(twap),
+            address(ibgtPriceFeed)
         );
     }
 
@@ -269,7 +307,8 @@ contract ApiaryBondDepositoryTest is Test {
             address(treasury),
             admin,
             address(0),
-            address(twap)
+            address(twap),
+            address(ibgtPriceFeed)
         );
     }
 
@@ -281,7 +320,8 @@ contract ApiaryBondDepositoryTest is Test {
             address(0),
             admin,
             address(0),
-            address(twap)
+            address(twap),
+            address(ibgtPriceFeed)
         );
     }
 
@@ -293,6 +333,21 @@ contract ApiaryBondDepositoryTest is Test {
             address(treasury),
             admin,
             address(0),
+            address(0),
+            address(ibgtPriceFeed)
+        );
+    }
+
+    function testRevert_Deployment_ZeroIbgtPriceFeed() public {
+        // Non-LP bond requires iBGT price feed
+        vm.expectRevert(ApiaryBondDepository.APIARY__ZERO_ADDRESS.selector);
+        new ApiaryBondDepository(
+            address(apiary),
+            address(ibgt),
+            address(treasury),
+            admin,
+            address(0),
+            address(twap),
             address(0)
         );
     }
@@ -327,7 +382,8 @@ contract ApiaryBondDepositoryTest is Test {
             address(treasury),
             admin,
             address(0),
-            address(twap)
+            address(twap),
+            address(ibgtPriceFeed)
         );
 
         vm.prank(admin);
@@ -347,7 +403,8 @@ contract ApiaryBondDepositoryTest is Test {
             address(treasury),
             admin,
             address(0),
-            address(twap)
+            address(twap),
+            address(ibgtPriceFeed)
         );
 
         vm.prank(admin);
@@ -367,7 +424,8 @@ contract ApiaryBondDepositoryTest is Test {
             address(treasury),
             admin,
             address(0),
-            address(twap)
+            address(twap),
+            address(ibgtPriceFeed)
         );
 
         vm.prank(admin);
@@ -507,14 +565,14 @@ contract ApiaryBondDepositoryTest is Test {
         assertEq(bondDepository.percentVestedFor(user1, 0), 10000);
     }
 
-    function test_Vesting_FiveDay() public {
+    function test_Vesting_SevenDay() public {
         uint256 depositAmount = 10e18;
 
         vm.prank(user1);
         bondDepository.deposit(depositAmount, 1e18);
 
-        // Move 5 days worth of blocks
-        vm.roll(block.number + 86_400);
+        // Move 7 days worth of blocks
+        vm.roll(block.number + 120_960);
 
         uint256 percentVested = bondDepository.percentVestedFor(user1, 0);
         assertEq(percentVested, 10000); // 100% vested
@@ -861,5 +919,96 @@ contract ApiaryBondDepositoryTest is Test {
         } else {
             assertLe(percentVested, 10000);
         }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    iBGT ORACLE PRICING TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Deposit_PayoutScalesWithIbgtPrice() public {
+        // Deposit at $1 iBGT
+        ibgtPriceFeed.setPrice(1e8); // $1
+        vm.prank(user1);
+        uint256 payoutAt1 = bondDepository.deposit(10e18, 1e18);
+
+        // Deposit at $3 iBGT
+        ibgtPriceFeed.setPrice(3e8); // $3
+        vm.prank(user2);
+        uint256 payoutAt3 = bondDepository.deposit(10e18, 1e18);
+
+        // $3 iBGT should give ~3x the payout of $1 iBGT
+        assertApproxEqRel(payoutAt3, payoutAt1 * 3, 0.01e18);
+    }
+
+    function testRevert_Deposit_StalePriceFeed() public {
+        // Warp to a realistic timestamp first, then set stale updatedAt
+        vm.warp(10_000);
+        ibgtPriceFeed.setUpdatedAt(block.timestamp - 7200); // 2 hours ago, exceeds 1 hour threshold
+
+        vm.prank(user1);
+        vm.expectRevert(ApiaryBondDepository.APIARY__STALE_PRICE_FEED.selector);
+        bondDepository.deposit(10e18, 1e18);
+    }
+
+    function testRevert_Deposit_ZeroPriceFromFeed() public {
+        ibgtPriceFeed.setPrice(0);
+
+        vm.prank(user1);
+        vm.expectRevert(ApiaryBondDepository.APIARY__INVALID_IBGT_PRICE.selector);
+        bondDepository.deposit(10e18, 1e18);
+    }
+
+    function testRevert_Deposit_NegativePriceFromFeed() public {
+        ibgtPriceFeed.setPrice(-1);
+
+        vm.prank(user1);
+        vm.expectRevert(ApiaryBondDepository.APIARY__INVALID_IBGT_PRICE.selector);
+        bondDepository.deposit(10e18, 1e18);
+    }
+
+    function test_QuoteValue_UsesOraclePrice() public {
+        // First deposit to populate cached prices
+        ibgtPriceFeed.setPrice(2e8); // $2
+        vm.prank(user1);
+        uint256 depositPayout = bondDepository.deposit(10e18, 1e18);
+
+        // quoteValue should give the same result for the same amount
+        (uint256 estimatedPayout,) = bondDepository.quoteValue(address(ibgt), 10e18);
+        assertEq(estimatedPayout, depositPayout);
+    }
+
+    function test_SetIbgtPriceFeed() public {
+        MockAggregatorV3 newFeed = new MockAggregatorV3(5e8, 8);
+
+        vm.prank(admin);
+        bondDepository.setIbgtPriceFeed(address(newFeed));
+
+        assertEq(address(bondDepository.ibgtPriceFeed()), address(newFeed));
+    }
+
+    function test_SetPriceFeedStalenessThreshold() public {
+        vm.prank(admin);
+        bondDepository.setPriceFeedStalenessThreshold(7200);
+
+        assertEq(bondDepository.priceFeedStalenessThreshold(), 7200);
+    }
+
+    function testRevert_SetIbgtPriceFeed_NotOwner() public {
+        vm.prank(attacker);
+        vm.expectRevert();
+        bondDepository.setIbgtPriceFeed(address(ibgtPriceFeed));
+    }
+
+    function test_Deposit_IbgtPriceFeedDecimals() public view {
+        assertEq(bondDepository.ibgtPriceFeedDecimals(), 8);
+    }
+
+    function test_Deposit_CachesIbgtPrice() public {
+        ibgtPriceFeed.setPrice(4e8); // $4
+
+        vm.prank(user1);
+        bondDepository.deposit(10e18, 1e18);
+
+        assertEq(bondDepository.lastCachedIbgtPrice(), 4e8);
     }
 }

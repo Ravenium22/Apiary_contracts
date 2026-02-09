@@ -174,16 +174,18 @@ contract VerifyDeployment is Script {
         _check("iBGT Bond principle", ibgtBond.principle() == address(ibgt));
         _check("iBGT Bond treasury", ibgtBond.treasury() == address(treasury));
         _check("iBGT Bond not liquidity", !ibgtBond.isLiquidityBond());
-        
+        _check("iBGT Bond price feed set", address(ibgtBond.ibgtPriceFeed()) != address(0));
+
         (uint256 ibgtVesting, uint256 ibgtDiscount, uint256 ibgtMaxDebt) = _getBondTerms(ibgtBond);
         _check("iBGT Bond vesting set", ibgtVesting > 0);
         _check("iBGT Bond discount set", ibgtDiscount > 0);
         _check("iBGT Bond max debt set", ibgtMaxDebt > 0);
-        
+
         // Bonding Calculator
         _check("Bond Calculator APIARY", bondingCalculator.APIARY() == address(apiary));
         _check("LP Bond calculator set", lpBond.bondCalculator() == address(bondingCalculator));
         _check("Treasury LP calculator set", address(treasury.lpCalculator()) == address(bondingCalculator));
+        _check("Treasury iBGT price feed set", address(treasury.ibgtPriceFeed()) != address(0));
 
         // LP Bond
         _check("LP Bond APIARY", lpBond.APIARY() == address(apiary));

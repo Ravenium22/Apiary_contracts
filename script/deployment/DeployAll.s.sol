@@ -67,6 +67,7 @@ contract DeployAll is Script {
     // ============ RESOLVED CONFIG (set in _loadConfig) ============
     // External addresses
     address internal IBGT_ADDRESS;
+    address internal IBGT_PRICE_FEED;
     address internal HONEY_ADDRESS;
     address internal INFRARED_STAKING;
     address internal KODIAK_ROUTER;
@@ -222,26 +223,28 @@ contract DeployAll is Script {
         console.log("STEP 9: Deploying Bond Contracts...");
 
         if (hasRealLP) {
-            // iBGT Bond
+            // iBGT Bond (uses iBGT/USD price feed for correct valuation)
             ApiaryBondDepository ibgtBond = new ApiaryBondDepository(
                 deployed.apiary,
                 IBGT_ADDRESS,
                 deployed.treasury,
                 deployer,
                 address(0), // No bond calculator for reserve token
-                deployed.twapOracle
+                deployed.twapOracle,
+                IBGT_PRICE_FEED
             );
             deployed.ibgtBond = address(ibgtBond);
             console.log("  iBGT Bond:", deployed.ibgtBond);
 
-            // LP Bond (uses bonding calculator for LP valuation)
+            // LP Bond (uses bonding calculator for LP valuation, no iBGT price feed)
             ApiaryBondDepository lpBond = new ApiaryBondDepository(
                 deployed.apiary,
                 deployed.apiaryHoneyLP,
                 deployed.treasury,
                 deployer,
                 deployed.bondingCalculator,
-                deployed.twapOracle
+                deployed.twapOracle,
+                address(0) // LP bonds don't need iBGT price feed
             );
             deployed.lpBond = address(lpBond);
             console.log("  LP Bond:", deployed.lpBond);
@@ -350,6 +353,8 @@ contract DeployAll is Script {
         console.log("  Yield manager set in treasury");
         treasury.setLPCalculator(deployed.bondingCalculator);
         console.log("  LP calculator set:", deployed.bondingCalculator);
+        treasury.setIbgtPriceFeed(IBGT_PRICE_FEED);
+        console.log("  iBGT price feed set:", IBGT_PRICE_FEED);
 
         // ============ STEP 13: Initialize Bond Terms (B-5) ============
         console.log("STEP 13: Initializing bond terms...");
@@ -515,6 +520,7 @@ contract DeployAll is Script {
 
         // -- External addresses --
         IBGT_ADDRESS = _requireEnvAddress("IBGT_ADDRESS");
+        IBGT_PRICE_FEED = _requireEnvAddress("IBGT_PRICE_FEED");
         HONEY_ADDRESS = _requireEnvAddress("HONEY_ADDRESS");
         INFRARED_STAKING = _requireEnvAddress("INFRARED_STAKING");
         KODIAK_ROUTER = _requireEnvAddress("KODIAK_ROUTER");

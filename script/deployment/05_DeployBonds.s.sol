@@ -26,6 +26,7 @@ import "../../src/ApiaryUniswapV2TwapOracle.sol";
  *   - TREASURY_ADDRESS: Address of treasury contract
  *   - DEPLOYER_ADDRESS: Admin address
  *   - MERKLE_ROOT: Initial merkle root for pre-sale whitelist
+ *   - IBGT_PRICE_FEED: Chainlink-compatible iBGT/USD price feed address
  */
 contract DeployBonds is Script {
     
@@ -45,6 +46,7 @@ contract DeployBonds is Script {
         address treasury = vm.envAddress("TREASURY_ADDRESS");
         address admin = vm.envAddress("DEPLOYER_ADDRESS");
         bytes32 merkleRoot = vm.envBytes32("MERKLE_ROOT");
+        address ibgtPriceFeed = vm.envAddress("IBGT_PRICE_FEED");
         
         console.log("=== Deploying Bond Contracts ===");
         console.log("APIARY:", apiary);
@@ -63,18 +65,19 @@ contract DeployBonds is Script {
         console.log("\n1. TWAP Oracle deployed:", address(twapOracle));
         
         // Deploy iBGT Bond Depository
-        // Constructor: (apiary, principle, treasury, admin, bondCalculator, twap)
+        // Constructor: (apiary, principle, treasury, admin, bondCalculator, twap, ibgtPriceFeed)
         ApiaryBondDepository ibgtBond = new ApiaryBondDepository(
             apiary,             // APIARY token
             ibgt,               // Principle (iBGT)
             treasury,           // Treasury
             admin,              // Admin/Owner
             address(0),         // No bond calculator (not LP)
-            address(twapOracle) // TWAP oracle
+            address(twapOracle),// TWAP oracle
+            ibgtPriceFeed       // iBGT/USD price feed
         );
-        
+
         console.log("2. iBGT Bond Depository deployed:", address(ibgtBond));
-        
+
         // Deploy LP Bond Depository
         // Note: Bond calculator contract would need to be deployed separately
         ApiaryBondDepository lpBond = new ApiaryBondDepository(
@@ -83,7 +86,8 @@ contract DeployBonds is Script {
             treasury,           // Treasury
             admin,              // Admin/Owner
             address(0),         // Bond calculator (deploy separately if needed)
-            address(twapOracle) // TWAP oracle
+            address(twapOracle),// TWAP oracle
+            address(0)          // No iBGT price feed for LP bonds
         );
         
         console.log("3. LP Bond Depository deployed:", address(lpBond));

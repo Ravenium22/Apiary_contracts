@@ -9,6 +9,7 @@ import { IApiaryToken } from "./interfaces/IApiaryToken.sol";
 import { IApiaryTreasury } from "./interfaces/IApiaryTreasury.sol";
 import { IApiaryUniswapV2TwapOracle } from "./interfaces/IApiaryUniswapV2TwapOracle.sol";
 import { IApiaryBondingCalculator } from "./interfaces/IApiaryBondingCalculator.sol";
+import { IAggregatorV3 } from "./interfaces/IAggregatorV3.sol";
 
 /**
  * @title ApiaryTreasury
@@ -63,6 +64,12 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     // LP bonding calculator for LP token valuation
     IApiaryBondingCalculator public lpCalculator;
 
+    // Chainlink-compatible iBGT/USD price feed for treasury valuation
+    IAggregatorV3 public ibgtPriceFeed;
+
+    /// @notice Maximum staleness of iBGT price feed data (default: 24 hours)
+    uint256 public ibgtPriceFeedStaleness = 86_400;
+
     /// @notice H-02 Fix: Maximum APIARY mintable per deposit call (0 = unlimited)
     uint256 public maxMintPerDeposit;
 
@@ -89,6 +96,10 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     error APIARY__EXCESSIVE_MINT_VALUE();
     /// @notice HIGH-01 Fix: Mint value exceeds allowed ratio relative to deposit amount
     error APIARY__EXCESSIVE_MINT_RATIO();
+    /// @notice iBGT price feed not configured
+    error APIARY__IBGT_PRICE_FEED_NOT_SET();
+    /// @notice iBGT price feed returned stale or invalid data
+    error APIARY__STALE_IBGT_PRICE();
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
@@ -96,6 +107,7 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
 
     event TwapOracleSet(address indexed twapOracle);
     event LPCalculatorSet(address indexed lpCalculator);
+    event IbgtPriceFeedSet(address indexed priceFeed);
     /// @notice H-02 Fix: Emitted when max mint per deposit is updated
     event MaxMintPerDepositSet(uint256 maxMint);
 
@@ -476,6 +488,25 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
         emit LPCalculatorSet(_lpCalculator);
     }
 
+    /**
+     * @notice Set the iBGT/USD price feed for treasury valuation
+     * @param _priceFeed Chainlink-compatible iBGT/USD price feed address
+     */
+    function setIbgtPriceFeed(address _priceFeed) external onlyOwner {
+        if (_priceFeed == address(0)) revert APIARY__ZERO_ADDRESS();
+        ibgtPriceFeed = IAggregatorV3(_priceFeed);
+        emit IbgtPriceFeedSet(_priceFeed);
+    }
+
+    /**
+     * @notice Set staleness threshold for iBGT price feed in treasury valuation
+     * @param _staleness Maximum age in seconds (e.g. 86400 = 24 hours)
+     */
+    function setIbgtPriceFeedStaleness(uint256 _staleness) external onlyOwner {
+        if (_staleness == 0) revert APIARY__ZERO_ADDRESS(); // reuse zero-check error
+        ibgtPriceFeedStaleness = _staleness;
+    }
+
     /*//////////////////////////////////////////////////////////////
                         VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -536,11 +567,21 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
         marketCap = (totalSupply * apiaryPrice) / 1e9;
 
         // Calculate treasury value
-        // 1. iBGT value: Get iBGT balance and convert to HONEY value
-        //    For now, assume iBGT ~ HONEY for simplicity (1:1 peg assumption)
-        //    In production, this should use an iBGT/HONEY oracle
+        // 1. iBGT value: convert to HONEY via iBGT/USD oracle (HONEY = $1 USD)
+        if (address(ibgtPriceFeed) == address(0)) revert APIARY__IBGT_PRICE_FEED_NOT_SET();
+
         uint256 ibgtBalance = _ibgtAccounting.availableBalance + _ibgtAccounting.totalStaked;
-        uint256 ibgtValue = ibgtBalance; // 1:1 assumption with HONEY
+        uint256 ibgtValue;
+        {
+            (, int256 answer,, uint256 updatedAt,) = ibgtPriceFeed.latestRoundData();
+            if (answer <= 0) revert APIARY__STALE_IBGT_PRICE();
+            if (block.timestamp - updatedAt > ibgtPriceFeedStaleness) revert APIARY__STALE_IBGT_PRICE();
+
+            // Unit math (example: 100 iBGT at $3, 8-dec feed):
+            //   100e18 * 3e8 / 1e8 = 300e18  (HONEY value in 18-dec)
+            // Result stays in 18-dec to match marketCap and treasuryValue denomination.
+            ibgtValue = (ibgtBalance * uint256(answer)) / (10 ** ibgtPriceFeed.decimals());
+        }
 
         // 2. LP token value: Use bonding calculator if set
         uint256 lpBalance = IERC20(APIARY_HONEY_LP).balanceOf(address(this));
