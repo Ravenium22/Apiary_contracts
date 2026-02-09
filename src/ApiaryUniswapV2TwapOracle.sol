@@ -26,8 +26,9 @@ contract ApiaryUniswapV2TwapOracle is IApiaryUniswapV2TwapOracle {
     /// @notice M-01 Fix: Number of full TWAP updates completed
     uint256 public updateCount;
     /// @notice M-01 Fix: Minimum real TWAP updates before oracle can be consulted
-    /// @dev MEDIUM-01 Fix: Increased from 2 to 3 to reduce bootstrap manipulation window
-    uint256 public constant MIN_UPDATES_REQUIRED = 3;
+    /// @dev AUDIT-MEDIUM-01 Fix: Increased from 3 to 6 (6 hours of TWAP data)
+    ///      to prevent bootstrap price manipulation via short-window attacks
+    uint256 public constant MIN_UPDATES_REQUIRED = 6;
 
     error APIARY__ZERO_ADDRESS();
     error APIARY__NO_RESERVES();

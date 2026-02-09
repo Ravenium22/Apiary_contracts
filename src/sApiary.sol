@@ -247,12 +247,20 @@ contract sApiary is ERC20Permit, Ownable2Step {
             emit LogSupply(epoch_, block.timestamp, _totalSupply);
             emit LogRebase(epoch_, 0, index());
             return _totalSupply;
-        } else if (circulatingSupply_ > 0) {
-            // Calculate proportional rebase: profit_ * totalSupply / circulatingSupply
-            rebaseAmount = profit_ * _totalSupply / circulatingSupply_;
-        } else {
-            rebaseAmount = profit_;
         }
+
+        // AUDIT-MEDIUM-05 Fix: Skip rebase when no tokens are circulating (all in staking contract).
+        // Rebasing with zero holders would inflate _totalSupply without benefiting anyone,
+        // and the profit_ would be diluted across the staking contract's own balance.
+        if (circulatingSupply_ == 0) {
+            emit LogSupply(epoch_, block.timestamp, _totalSupply);
+            emit LogRebase(epoch_, 0, index());
+            return _totalSupply;
+        }
+
+        // Calculate proportional rebase: profit_ * totalSupply / circulatingSupply
+        // (circulatingSupply_ is guaranteed > 0 at this point)
+        rebaseAmount = profit_ * _totalSupply / circulatingSupply_;
 
         // Increase total supply
         _totalSupply = _totalSupply + rebaseAmount;
@@ -374,6 +382,9 @@ contract sApiary is ERC20Permit, Ownable2Step {
      * @param value The amount of tokens to transfer.
      */
     function transfer(address to, uint256 value) public override returns (bool) {
+        // AUDIT-HIGH-03 Fix: Prevent transfers to zero address which would corrupt
+        // rebasing accounting (_totalSupply unchanged but gons trapped at address(0))
+        require(to != address(0), "sApiary: transfer to zero address");
         // H-03 Fix: Calculate gons first to avoid rounding mismatch between check and transfer
         uint256 gonValue = gonsForBalance(value);
         require(_gonBalances[msg.sender] >= gonValue, "sApiary: insufficient balance");
@@ -392,6 +403,9 @@ contract sApiary is ERC20Permit, Ownable2Step {
      * @param value The amount of tokens to transfer.
      */
     function transferFrom(address from, address to, uint256 value) public override returns (bool) {
+        // AUDIT-HIGH-03 Fix: Prevent transfers to zero address which would corrupt
+        // rebasing accounting (_totalSupply unchanged but gons trapped at address(0))
+        require(to != address(0), "sApiary: transfer to zero address");
         // H-03 Fix: Calculate gons first to avoid rounding mismatch between check and transfer
         uint256 gonValue = gonsForBalance(value);
         require(_gonBalances[from] >= gonValue, "sApiary: insufficient balance");

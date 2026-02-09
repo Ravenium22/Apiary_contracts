@@ -3,7 +3,29 @@
     "allow": [
       "Bash(wc:*)",
       "Bash(grep:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(forge test:*)",
+      "Bash(forge build:*)",
+      "Bash(cd:*)",
+      "WebFetch(domain:infrared.finance)",
+      "WebSearch",
+      "WebFetch(domain:infrared-dao.github.io)",
+      "Bash(findstr:*)",
+      "Bash(forge coverage:*)",
+      "Bash(git status:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nMainnet readiness: IInfrared rewrite, BondingCalculator, gas optimizations, audit fixes\n\nPhase 1 - Critical Blockers:\n- Rewrite IInfrared.sol to real InfraredVault MultiRewards interface\n  \\(stake/withdraw/getReward/exit, multi-token rewards via getAllRewardTokens\\)\n- Update ApiaryInfraredAdapter for multi-token reward claiming\n  \\(claimRewards/pendingRewards return address[]+uint256[]\\)\n- Update IApiaryInfraredAdapter interface to match\n- Update ApiaryYieldManager to iterate multi-token rewards, swap non-iBGT to iBGT\n- Implement ApiaryBondingCalculator with fair LP valuation formula\n  \\(2 * sqrt\\(reserve0 * reserve1\\) * amount / totalSupply\\)\n\nPhase 2 - Gas Optimizations:\n- Pack Bond struct from 3 to 2 storage slots \\(uint256 -> uint128 payout/pricePaid\\)\n- Cache userBonds[msg.sender] storage pointer in deposit\\(\\)\n- Unchecked loop increment in redeemAll\\(\\)\n- Cache splitConfig as memory in Phase 1/2 strategy execution\n\nPhase 3 - Audit Findings:\n- Fix DOMAIN_SEPARATOR stale-after-fork \\(INFO-03\\) in ERC20Permit and sApiary\n  \\(replace public variable with dynamic function calling _domainSeparator\\(\\)\\)\n\nPhase 4 - Deployment & Configuration:\n- Add BondingCalculator to DeployAll.s.sol and VerifyDeployment.s.sol\n- Configure .env.example with Berachain mainnet addresses \\(iBGT, HONEY,\n  Infrared vault, Kodiak router/factory, multisig\\)\n- Set bond/epoch params for 7-day vesting \\(302400 blocks at 2s/block\\)\n- Set bond allocations to 20M APIARY with maxPayout=1 \\($1k per bond cap\\)\n- Clarify Phase 1 yield split comments \\(50% LP / 50% burn\\)\n\nAll 427 tests passing, 0 failures.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(forge script:*)",
+      "Bash(MERKLE_ROOT=0x0000000000000000000000000000000000000000000000000000000000000001 forge script script/deployment/DeployAll.s.sol:DeployAll --rpc-url https://rpc.berachain.com --private-key 0x1cfc168be228c84b73dd1e7cb3dee3a3946f50960805e8978d5627e3dd927206 -vvv)",
+      "Bash(set IBGT_PRICE_FEED=0x0000000000000000000000000000000000000001:*)",
+      "Bash(IBGT_PRICE_FEED=0x0000000000000000000000000000000000000001 forge script:*)",
+      "Bash(IBGT_PRICE_FEED=0x0000000000000000000000000000000000000001 MERKLE_ROOT=0x1111111111111111111111111111111111111111111111111111111111111111 MULTISIG_ADDRESS=0x87cf2DD460bE20555be5fE0910C988D27D7c48f8 forge script:*)",
+      "Bash(IBGT_PRICE_FEED=0x0000000000000000000000000000000000000001 APIARY_ADDRESS=0x0000000000000000000000000000000000000002 IBGT_ADDRESS=0xac03CABA51e17c86c921E1f6CBFBdC91F8BB2E6b HONEY_ADDRESS=0xFCBD14DC51f0A4d49d5E53C2E0950e0bC26d0Dce APIARY_HONEY_LP=0x0000000000000000000000000000000000000003 TREASURY_ADDRESS=0x0000000000000000000000000000000000000004 DEPLOYER_ADDRESS=0x0000000000000000000000000000000000000005 MERKLE_ROOT=0x1111111111111111111111111111111111111111111111111111111111111111 forge script:*)",
+      "Bash(git commit:*)",
+      "Bash(python -c:*)",
+      "Bash(python3:*)",
+      "Bash(pip install:*)"
     ]
   }
 }

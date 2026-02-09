@@ -273,6 +273,9 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     event ProtocolModeChanged(ProtocolMode indexed oldMode, ProtocolMode indexed newMode, uint256 marketCap, uint256 treasuryValue);
 
     /// @notice Emitted when buffer zone thresholds are updated
+    /// @notice AUDIT-MEDIUM-04 Fix: Emitted when Phase 2 falls back to Phase 1 due to zero treasury value
+    event Phase2FallbackTriggered(uint256 totalYield);
+
     event BufferThresholdsUpdated(
         uint256 growthEntry,
         uint256 growthExit,
@@ -541,6 +544,8 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
 
         // Handle edge case where treasury returns zeros
         if (treasuryValue == 0) {
+            // AUDIT-MEDIUM-04 Fix: Emit event so off-chain monitoring can detect the fallback
+            emit Phase2FallbackTriggered(totalYield);
             // Fallback to Phase 1 if we can't determine MC/TV ratio
             (honeySwapped, apiaryBurned, lpCreated) = _executePhase1Strategy(totalYield);
             return (honeySwapped, apiaryBurned, lpCreated, 0);

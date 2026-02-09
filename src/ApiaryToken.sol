@@ -209,10 +209,13 @@ contract ApiaryToken is ERC20Permit, VaultOwned, AccessControl {
             revert APIARY__TRANSFER_AMOUNT_EXCEEDS_BALANCE();
         }
 
+        // AUDIT-HIGH-02 Fix: Only use unchecked for the subtraction (provably safe
+        // from the senderBalance >= amount check above). Recipient addition uses
+        // checked arithmetic to prevent silent overflow with uncapped supply.
         unchecked {
             _balances[sender] = senderBalance - amount;
-            _balances[recipient] += amount;
         }
+        _balances[recipient] += amount;
 
         emit Transfer(sender, recipient, amount);
     }

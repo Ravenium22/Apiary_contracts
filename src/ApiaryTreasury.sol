@@ -171,6 +171,11 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
             totalReturned: 0,
             availableBalance: 0
         });
+
+        // AUDIT-HIGH-01 Fix: Default maxMintRatioBps to 120% to prevent
+        // a compromised depositor from minting disproportionate APIARY.
+        // Owner can adjust via setMaxMintRatio() if needed.
+        maxMintRatioBps = 12000;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -605,17 +610,26 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
 
     /**
      * @notice M-03 Fix: Sync iBGT accounting with actual balance
-     * @dev Use if accounting drifts due to direct transfers to treasury
-     *      This sets availableBalance to match actual token balance
+     * @dev AUDIT-MEDIUM-02 Fix: No longer auto-inflates totalReserves from donated iBGT.
+     *      Only adjusts availableBalance downward (clamp to actual) or requires explicit
+     *      owner-supplied surplus amount to prevent donation-based reserve inflation attacks.
+     * @param _acknowledgedSurplus The amount of surplus the owner explicitly acknowledges
+     *        as legitimate (e.g., from direct deposits). Pass 0 to only clamp downward.
      */
-    function syncIBGTAccounting() external onlyOwner {
+    function syncIBGTAccounting(uint256 _acknowledgedSurplus) external onlyOwner {
         uint256 actualBalance = IERC20(IBGT).balanceOf(address(this));
         uint256 oldAvailable = _ibgtAccounting.availableBalance;
 
-        // M-07 Fix: Also update totalReserves when syncing to prevent accounting mismatch
-        if (actualBalance > oldAvailable) {
-            uint256 surplus = actualBalance - oldAvailable;
-            totalReserves[IBGT] += surplus;
+        // AUDIT-MEDIUM-02 Fix: Only add to totalReserves the amount the owner explicitly
+        // acknowledges, preventing an attacker from donating iBGT to inflate reserves
+        // and manipulate the bond debt-ratio discount tiers.
+        if (_acknowledgedSurplus > 0) {
+            uint256 actualSurplus = actualBalance > oldAvailable ? actualBalance - oldAvailable : 0;
+            // Cannot acknowledge more surplus than actually exists
+            if (_acknowledgedSurplus > actualSurplus) {
+                _acknowledgedSurplus = actualSurplus;
+            }
+            totalReserves[IBGT] += _acknowledgedSurplus;
         }
 
         // Sync available balance with actual token balance

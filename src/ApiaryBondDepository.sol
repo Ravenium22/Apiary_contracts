@@ -179,6 +179,11 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Last iBGT oracle price, cached for quoteValue() view function
     uint256 public lastCachedIbgtPrice;
 
+    /// @notice AUDIT-MEDIUM-03 Fix: Actual unredeemed bond obligations (only decrements on redeem)
+    /// @dev Unlike totalDebt which decays linearly, this tracks real outstanding payouts
+    ///      and is used in clawBackTokens() to protect bond holder funds.
+    uint256 public totalUnredeemedPayout;
+
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -335,6 +340,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 amount,
         uint256 maxPriceInHoney
     ) external whenNotPaused nonReentrant returns (uint256 payout) {
+        // AUDIT-MEDIUM-06 Fix: Ensure bond terms have been initialized before accepting deposits
+        if (terms.vestingTerm == 0) revert APIARY__INVALID_VESTING_TERM();
         if (amount == 0) revert APIARY__INVALID_AMOUNT();
         if (maxPriceInHoney == 0) revert APIARY__INVALID_MAX_PRICE();
 
@@ -372,6 +379,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
 
         // Update total debt
         totalDebt += payOut;
+        // AUDIT-MEDIUM-03 Fix: Track actual unredeemed obligations for clawBack protection
+        totalUnredeemedPayout += payOut;
         payout = payOut;
 
         // C-02 Fix: Check user hasn't exceeded max bonds before creating new one
@@ -437,6 +446,9 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         // MEDIUM-05 Fix: totalDebt reduction removed from redeem() to prevent
         // double-counting with _decayDebt(). Debt is now solely managed by linear decay.
 
+        // AUDIT-MEDIUM-03 Fix: Decrement actual unredeemed obligations on redeem
+        totalUnredeemedPayout -= payout;
+
         IERC20(APIARY).safeTransfer(msg.sender, payout);
     }
 
@@ -478,6 +490,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         }
 
         if (totalPayout == 0) revert APIARY__NOTHING_TO_REDEEM();
+        // AUDIT-MEDIUM-03 Fix: Decrement actual unredeemed obligations on redeemAll
+        totalUnredeemedPayout -= totalPayout;
         IERC20(APIARY).safeTransfer(msg.sender, totalPayout);
     }
 
@@ -679,9 +693,10 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 balance = IERC20(_token).balanceOf(address(this));
         if (balance < _amount) revert APIARY__INVALID_AMOUNT();
 
-        // C-02 Fix: Protect APIARY reserved for bond holder redemptions
+        // C-02 Fix + AUDIT-MEDIUM-03 Fix: Protect APIARY reserved for bond holder redemptions
+        // Uses totalUnredeemedPayout (actual obligations) instead of totalDebt (which decays linearly)
         if (_token == APIARY) {
-            uint256 excess = balance > totalDebt ? balance - totalDebt : 0;
+            uint256 excess = balance > totalUnredeemedPayout ? balance - totalUnredeemedPayout : 0;
             if (_amount > excess) revert APIARY__INVALID_AMOUNT();
         }
 
