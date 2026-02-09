@@ -577,6 +577,14 @@ contract DeployAll is Script {
                 "DeployAll: placeholder merkle root not allowed on mainnet"
             );
             require(MULTISIG != address(0), "DeployAll: MULTISIG_ADDRESS required on mainnet");
+
+            // LP pair must be a real deployed contract on mainnet
+            // (bonds and TWAP oracle depend on it; deploying without LP silently skips them)
+            address lpCheck = _tryGetLPPairAddress();
+            require(
+                lpCheck != address(0) && lpCheck.code.length > 0,
+                "DeployAll: LP_PAIR_ADDRESS required on mainnet (create LP pool first)"
+            );
         }
 
         console.log("  Config OK\n");

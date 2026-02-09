@@ -49,13 +49,13 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     /**
      * @notice Bond terms configuration
      * @param vestingTerm Duration of vesting in blocks (7 days default)
-     * @param maxPayout Maximum payout as % of total allocation (in thousandths)
+     * @param maxPayout Maximum single bond in bps of estimated treasury value (100 = 1%)
      * @param discountRate Discount from market price (in basis points)
      * @param maxDebt Maximum total debt allowed
      */
     struct Terms {
         uint256 vestingTerm;   // in blocks
-        uint256 maxPayout;     // in thousandths of a %. i.e. 500 = 0.5%
+        uint256 maxPayout;     // max single bond in bps of treasury value (100 = 1%)
         uint256 discountRate;  // in basis points (100 = 1%)
         uint256 maxDebt;       // maximum total debt allowed
     }
@@ -184,6 +184,16 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     ///      and is used in clawBackTokens() to protect bond holder funds.
     uint256 public totalUnredeemedPayout;
 
+    /// @notice Maximum daily issuance as basis points of total APIARY supply (default: 300 = 3%)
+    /// @dev Per doc: "Maximum Daily Issuance: 3% of total $APIARY supply". Set to 0 to disable.
+    uint256 public maxDailyIssuanceBps;
+
+    /// @notice APIARY issued in the current day (resets when a new day starts)
+    uint256 public dailyIssuanceAmount;
+
+    /// @notice Block number when the daily issuance counter was last reset
+    uint256 public dailyIssuanceResetBlock;
+
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -214,6 +224,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__INVALID_PRICE_DEVIATION();
     /// @notice Bonds paused due to debt ratio exceeding 10%
     error APIARY__BONDS_PAUSED_HIGH_DEBT();
+    /// @notice Daily issuance cap exceeded (max 3% of total APIARY supply per day)
+    error APIARY__DAILY_ISSUANCE_EXCEEDED();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -254,6 +266,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     event IbgtPriceFeedUpdated(address indexed priceFeed);
     /// @notice Emitted when price feed staleness threshold is updated
     event PriceFeedStalenessThresholdUpdated(uint256 oldThreshold, uint256 newThreshold);
+    /// @notice Emitted when max daily issuance bps is updated
+    event MaxDailyIssuanceBpsUpdated(uint256 oldBps, uint256 newBps);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -313,6 +327,9 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
 
         // M-NEW-02 Fix: Initialize price deviation protection (20% max deviation)
         maxPriceDeviation = 2000; // 20% in basis points
+
+        // Daily issuance cap: 3% of total APIARY supply per day (per doc)
+        maxDailyIssuanceBps = 300;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -367,6 +384,9 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 _maxPayout = maxPayout();
         if (_maxPayout == 0) revert APIARY__BOND_SOLD_OUT();
         if (payOut > _maxPayout) revert APIARY__BOND_TOO_LARGE();
+
+        // Daily issuance cap: max 3% of total APIARY supply per day
+        _checkAndUpdateDailyIssuance(payOut);
 
         // Transfer principle tokens from user to this contract
         IERC20(principle).safeTransferFrom(msg.sender, address(this), amount);
@@ -502,7 +522,7 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     /**
      * @notice Initialize bond terms (one-time only)
      * @param _vestingTerm Vesting duration in blocks
-     * @param _maxPayout Maximum payout as % of allocation
+     * @param _maxPayout Max single bond in bps of treasury value (100 = 1%)
      * @param _discountRate Discount from market price (bps)
      * @param _maxDebt Maximum total debt
      */
@@ -514,7 +534,7 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     ) external onlyOwner {
         if (terms.vestingTerm != 0) revert APIARY__ALREADY_INITIALIZED();
         if (_vestingTerm < MINIMUM_VESTING_TERM) revert APIARY__INVALID_VESTING_TERM();
-        if (_maxPayout > 1000) revert APIARY__INVALID_MAX_PAYOUT(); // Max 1%
+        if (_maxPayout > 1000) revert APIARY__INVALID_MAX_PAYOUT(); // Max 10% of treasury value
         // M-09 Fix: Limit discount rate to 50% max
         if (_discountRate > MAX_DISCOUNT_RATE) revert APIARY__INVALID_DISCOUNT_RATE();
 
@@ -538,7 +558,7 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
             if (_input < MINIMUM_VESTING_TERM) revert APIARY__INVALID_VESTING_TERM();
             terms.vestingTerm = _input;
         } else if (_parameter == PARAMETER.PAYOUT) {
-            if (_input > 1000) revert APIARY__INVALID_MAX_PAYOUT();
+            if (_input > 1000) revert APIARY__INVALID_MAX_PAYOUT(); // Max 10% of treasury value
             terms.maxPayout = _input;
         } else if (_parameter == PARAMETER.DISCOUNT_RATE) {
             // M-09 Fix: Limit discount rate to 50% max
@@ -728,6 +748,50 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
             totalDebt = totalDebt > decay ? totalDebt - decay : 0;
             lastDecayBlock = block.number;
         }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    DAILY ISSUANCE CAP
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Check and update daily issuance counter
+     * @dev Resets counter when a new day starts (blocksPerDay blocks since last reset).
+     *      Reverts if adding newPayout would exceed maxDailyIssuanceBps of total supply.
+     * @param newPayout The APIARY payout to be issued
+     */
+    function _checkAndUpdateDailyIssuance(uint256 newPayout) internal {
+        if (maxDailyIssuanceBps == 0) return; // Disabled
+
+        uint256 totalSupply = IERC20(APIARY).totalSupply();
+        if (totalSupply == 0) return; // No supply yet, skip check
+
+        // Reset counter if a new day has started
+        if (block.number >= dailyIssuanceResetBlock + blocksPerDay) {
+            dailyIssuanceAmount = 0;
+            dailyIssuanceResetBlock = block.number;
+        }
+
+        // Max daily = totalSupply * maxDailyIssuanceBps / BPS
+        uint256 maxDaily = totalSupply.mulDiv(maxDailyIssuanceBps, BPS);
+
+        if (dailyIssuanceAmount + newPayout > maxDaily) {
+            revert APIARY__DAILY_ISSUANCE_EXCEEDED();
+        }
+
+        dailyIssuanceAmount += newPayout;
+    }
+
+    /**
+     * @notice Set maximum daily issuance as basis points of total APIARY supply
+     * @dev Set to 0 to disable the daily cap. Default: 300 (3%).
+     * @param _bps New max daily issuance in basis points (max 1000 = 10%)
+     */
+    function setMaxDailyIssuanceBps(uint256 _bps) external onlyOwner {
+        if (_bps > 1000) revert APIARY__INVALID_AMOUNT(); // Max 10%
+        uint256 oldBps = maxDailyIssuanceBps;
+        maxDailyIssuanceBps = _bps;
+        emit MaxDailyIssuanceBpsUpdated(oldBps, _bps);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1025,12 +1089,48 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Calculate maximum payout per bond
-     * @return Maximum payout based on treasury allocation
+     * @notice Calculate maximum payout per bond (1% of treasury value per doc)
+     * @dev Uses cached oracle prices to estimate treasury value in APIARY terms.
+     *      Falls back to allocation-based limit before first deposit (no cached prices).
+     * @return Maximum payout in APIARY (9 decimals)
      */
     function maxPayout() public view returns (uint256) {
+        uint256 treasuryValueInApiary = _estimateTreasuryValueInApiary();
+
+        if (treasuryValueInApiary > 0) {
+            return treasuryValueInApiary.mulDiv(terms.maxPayout, BPS);
+        }
+
+        // Fallback before first deposit (cached prices are zero)
         uint256 totalAllocatedToTreasury = IApiaryToken(APIARY).allocationLimits(treasury);
         return totalAllocatedToTreasury.mulDiv(terms.maxPayout, BPS);
+    }
+
+    /**
+     * @notice Estimate treasury value of this bond's principle reserves in APIARY terms
+     * @dev Uses cached oracle prices from the most recent deposit() call.
+     *      For iBGT: converts via iBGT/USD and APIARY/HONEY cached prices.
+     *      For LP: uses bonding calculator valuation (already APIARY-denominated).
+     * @return valueInApiary Estimated treasury reserves value in APIARY (9 decimals)
+     */
+    function _estimateTreasuryValueInApiary() internal view returns (uint256 valueInApiary) {
+        uint256 reserves = IApiaryTreasury(treasury).totalReserves(principle);
+        if (reserves == 0) return 0;
+
+        if (isLiquidityBond) {
+            // LP valuation returns APIARY-equivalent value (9 decimals)
+            return IApiaryBondingCalculator(bondCalculator).valuation(principle, reserves);
+        } else {
+            // iBGT: convert reserves → HONEY → APIARY using cached prices
+            uint256 cachedIbgt = lastCachedIbgtPrice;
+            uint256 cachedApiary = lastCachedApiaryPrice;
+            if (cachedIbgt == 0 || cachedApiary == 0) return 0;
+
+            // reserves(18-dec) * ibgtPrice / feedDecimals → HONEY(18-dec)
+            uint256 honeyValue = reserves.mulDiv(cachedIbgt, 10 ** ibgtPriceFeedDecimals);
+            // HONEY(18-dec) * 1e9 / apiaryPrice(18-dec) → APIARY(9-dec)
+            return honeyValue.mulDiv(1e9, cachedApiary);
+        }
     }
 
     /**

@@ -98,6 +98,7 @@ contract MockAPIARY is MockERC20 {
 contract MockTreasury {
     MockAPIARY public apiaryToken;
     mapping(address => bool) public isReserveDepositor;
+    mapping(address => uint256) public totalReserves;
 
     constructor(address _apiary) {
         apiaryToken = MockAPIARY(_apiary);
@@ -107,10 +108,17 @@ contract MockTreasury {
         // Take tokens from depositor (bond depository)
         IERC20(_token).transferFrom(msg.sender, address(this), _amount);
 
+        // Track reserves
+        totalReserves[_token] += _amount;
+
         // Mint APIARY to bond depository
         apiaryToken.mint(msg.sender, value);
 
         return value;
+    }
+
+    function setTotalReserves(address _token, uint256 _amount) external {
+        totalReserves[_token] = _amount;
     }
 }
 
@@ -245,6 +253,13 @@ contract ApiaryBondDepositoryTest is Test {
             DISCOUNT_RATE,
             MAX_DEBT
         );
+
+        // Pre-seed treasury with reserves for treasury-value-based maxPayout
+        ibgt.mint(address(treasury), 100_000e18);
+        treasury.setTotalReserves(address(ibgt), 100_000e18);
+
+        // Mint initial APIARY supply for daily issuance cap (3% of supply per day)
+        apiary.mint(address(0xdead), 200_000e9);
 
         // Give users iBGT
         ibgt.mint(user1, 100_000e18);

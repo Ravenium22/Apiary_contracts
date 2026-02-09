@@ -20,7 +20,7 @@ import { PreSaleBondState, InvestorBondInfo } from "./types/BeraReserveTypes.sol
  * 
  * **Pre-Sale Details:**
  * - Total Allocation: 55% of supply = 110,000 APIARY
- * - Token Price: $0.25 per APIARY ($50k market cap / 200k total supply)
+ * - Token Price: $0.50 per APIARY ($100k market cap / 200k total supply)
  * - Payment Token: HONEY (Berachain native stablecoin)
  * - Per-Wallet Limit: Configurable by admin (default: 500 APIARY = $125)
  * - Whitelist: Merkle proof based for partners (Plug, ApDao, YeetDat, BoogaBullas)
@@ -92,14 +92,14 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
     uint128 public totalBondsSold;
 
     /// @notice Token price in HONEY (18 decimals)
-    /// @dev Default: $0.25 = 0.25e18 HONEY per APIARY
+    /// @dev Default: $0.50 = 0.50e18 HONEY per APIARY
     uint128 public tokenPrice;
 
     /// @notice Total HONEY raised from pre-sale
     uint128 public totalHoneyRaised;
 
     /// @notice Maximum APIARY per wallet
-    /// @dev Default: 500 APIARY = $125 at $0.25/token
+    /// @dev Default: 500 APIARY = $250 at $0.50/token
     uint128 public bondPurchaseLimit;
 
     /// @notice TGE (Token Generation Event) start timestamp
@@ -182,10 +182,10 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
         merkleRoot = _merkleRoot;
 
         // Default values
-        // $0.25 per APIARY = 0.25e18 HONEY (assuming 1 HONEY = $1)
-        tokenPrice = 25e16; // 0.25 HONEY
+        // $0.50 per APIARY = 0.50e18 HONEY (assuming 1 HONEY = $1)
+        tokenPrice = 50e16; // 0.50 HONEY
 
-        // Default limit: 500 APIARY = $125 at $0.25/token
+        // Default limit: 500 APIARY = $250 at $0.50/token
         bondPurchaseLimit = 500e9;
 
         // Whitelist enabled by default
@@ -435,7 +435,7 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
     /**
      * @notice Update token price
      * @param _price New price in HONEY (18 decimals)
-     * @dev Example: $0.25 = 25e16 (0.25 * 1e18)
+     * @dev Example: $0.50 = 50e16 (0.50 * 1e18)
      */
     function setTokenPrice(uint128 _price) external onlyOwner {
         if (_price == 0) {
