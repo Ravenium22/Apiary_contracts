@@ -25,7 +25,8 @@
       "Bash(git commit:*)",
       "Bash(python -c:*)",
       "Bash(python3:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(dir:*)"
     ]
   }
 }
