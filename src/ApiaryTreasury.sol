@@ -100,6 +100,8 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     error APIARY__IBGT_PRICE_FEED_NOT_SET();
     /// @notice iBGT price feed returned stale or invalid data
     error APIARY__STALE_IBGT_PRICE();
+    /// @notice Staleness threshold cannot be zero
+    error APIARY__INVALID_STALENESS();
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
@@ -110,6 +112,8 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     event IbgtPriceFeedSet(address indexed priceFeed);
     /// @notice H-02 Fix: Emitted when max mint per deposit is updated
     event MaxMintPerDepositSet(uint256 maxMint);
+    /// @notice Emitted when max mint ratio is updated
+    event MaxMintRatioSet(uint256 maxRatioBps);
 
     /*//////////////////////////////////////////////////////////////
                                 MODIFIERS
@@ -225,9 +229,10 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
                 uint256 calculatedValue = lpCalculator.valuation(_token, _amount);
                 maxReasonableValue = (calculatedValue * maxMintRatioBps) / 10000;
             } else {
-                // For reserve tokens (iBGT), value ~ amount adjusted for decimals
-                // iBGT is 18 decimals, APIARY is 9 decimals, so 1e18 iBGT -> 1e9 APIARY
-                maxReasonableValue = (_amount * maxMintRatioBps) / 10000;
+                // For reserve tokens (iBGT), apply partial decimal correction (3 of 9)
+                // to catch decimal-scale confusion while leaving 1e6 implicit tolerance
+                // that absorbs any realistic iBGT/APIARY price ratio without tuning
+                maxReasonableValue = (_amount * maxMintRatioBps) / (10_000 * 1e3);
             }
             if (value > maxReasonableValue) {
                 revert APIARY__EXCESSIVE_MINT_RATIO();
@@ -471,6 +476,7 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
      */
     function setMaxMintRatio(uint256 _maxRatioBps) external onlyOwner {
         maxMintRatioBps = _maxRatioBps;
+        emit MaxMintRatioSet(_maxRatioBps);
     }
 
     /**
@@ -508,7 +514,7 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
      * @param _staleness Maximum age in seconds (e.g. 86400 = 24 hours)
      */
     function setIbgtPriceFeedStaleness(uint256 _staleness) external onlyOwner {
-        if (_staleness == 0) revert APIARY__ZERO_ADDRESS(); // reuse zero-check error
+        if (_staleness == 0) revert APIARY__INVALID_STALENESS();
         ibgtPriceFeedStaleness = _staleness;
     }
 
