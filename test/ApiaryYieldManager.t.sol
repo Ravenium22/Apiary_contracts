@@ -495,7 +495,9 @@ contract ApiaryYieldManagerTest is Test {
         // Initially no pending rewards
         uint256 pendingInitial = yieldManager.pendingYield();
         assertEq(pendingInitial, 0);
-        
+
+        // Set mock reward token to iBGT so pendingYield() counts it
+        mockInfraredAdapter.setMockRewardToken(IBGT_TOKEN);
         // Set pending rewards in mock adapter
         mockInfraredAdapter.setPendingRewards(500e18);
         
@@ -510,6 +512,8 @@ contract ApiaryYieldManagerTest is Test {
         assertEq(canExecuteInitial, false);
         assertEq(pendingInitial, 0);
         
+        // Set mock reward token to iBGT so pendingYield() counts it
+        mockInfraredAdapter.setMockRewardToken(IBGT_TOKEN);
         // Set pending rewards above minimum (default minYieldAmount is 0.1e18)
         mockInfraredAdapter.setPendingRewards(1e18);
         

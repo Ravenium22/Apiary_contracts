@@ -288,11 +288,9 @@ contract ApiaryInfraredAdapter is Ownable2Step, Pausable, ReentrancyGuard {
     function _approveIfNeeded(address token, address spender, uint256 amount) internal {
         uint256 currentAllowance = IERC20(token).allowance(address(this), spender);
         if (currentAllowance < amount) {
-            // Reset to 0 first (required by some tokens like USDT)
-            if (currentAllowance > 0) {
-                IERC20(token).approve(spender, 0);
-            }
-            IERC20(token).approve(spender, amount);
+            // M-03 Audit Fix: Use SafeERC20.forceApprove() for compatibility with
+            // non-standard tokens (e.g., USDT) that don't return bool from approve().
+            IERC20(token).forceApprove(spender, amount);
         }
     }
 

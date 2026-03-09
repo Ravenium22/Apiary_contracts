@@ -244,7 +244,7 @@ contract ApiaryTreasuryTest is Test {
 
     function test_Deposit_ReserveToken() public {
         uint256 depositAmount = 1000e18;
-        uint256 apiaryValue = 10_000e9;
+        uint256 apiaryValue = 1000e9;
 
         vm.expectEmit(true, true, true, false);
         emit Deposit(address(ibgt), depositAmount, apiaryValue);
@@ -259,7 +259,7 @@ contract ApiaryTreasuryTest is Test {
 
     function test_Deposit_LiquidityToken() public {
         uint256 depositAmount = 1000e18;
-        uint256 apiaryValue = 10_000e9;
+        uint256 apiaryValue = 1000e9;
 
         vm.prank(liquidityDepositor);
         uint256 minted = treasury.deposit(depositAmount, address(lpToken), apiaryValue);
@@ -271,7 +271,7 @@ contract ApiaryTreasuryTest is Test {
 
     function test_Deposit_UpdatesIBGTAccounting() public {
         uint256 depositAmount = 1000e18;
-        uint256 apiaryValue = 10_000e9;
+        uint256 apiaryValue = 1000e9;
 
         vm.prank(reserveDepositor);
         treasury.deposit(depositAmount, address(ibgt), apiaryValue);
@@ -284,7 +284,7 @@ contract ApiaryTreasuryTest is Test {
 
     function test_Deposit_MintsAPIARY() public {
         uint256 depositAmount = 1000e18;
-        uint256 apiaryValue = 10_000e9;
+        uint256 apiaryValue = 1000e9;
 
         vm.prank(reserveDepositor);
         treasury.deposit(depositAmount, address(ibgt), apiaryValue);
@@ -300,7 +300,7 @@ contract ApiaryTreasuryTest is Test {
         randomToken.approve(address(treasury), 1000e18);
 
         vm.expectRevert(ApiaryTreasury.APIARY__INVALID_TOKEN.selector);
-        treasury.deposit(1000e18, address(randomToken), 10_000e9);
+        treasury.deposit(1000e18, address(randomToken), 1000e9);
         vm.stopPrank();
     }
 
@@ -308,14 +308,14 @@ contract ApiaryTreasuryTest is Test {
         vm.prank(attacker);
 
         vm.expectRevert(ApiaryTreasury.APIARY__INVALID_RESERVE_DEPOSITOR.selector);
-        treasury.deposit(1000e18, address(ibgt), 10_000e9);
+        treasury.deposit(1000e18, address(ibgt), 1000e9);
     }
 
     function testRevert_Deposit_InvalidLiquidityDepositor() public {
         vm.prank(attacker);
 
         vm.expectRevert(ApiaryTreasury.APIARY__INVALID_LIQUIDITY_DEPOSITOR.selector);
-        treasury.deposit(1000e18, address(lpToken), 10_000e9);
+        treasury.deposit(1000e18, address(lpToken), 1000e9);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -325,7 +325,7 @@ contract ApiaryTreasuryTest is Test {
     function test_BorrowReserves() public {
         // First deposit
         vm.prank(reserveDepositor);
-        treasury.deposit(1000e18, address(ibgt), 10_000e9);
+        treasury.deposit(1000e18, address(ibgt), 1000e9);
 
         uint256 borrowAmount = 500e18;
 
@@ -343,7 +343,7 @@ contract ApiaryTreasuryTest is Test {
     function test_RepayReserves() public {
         // First deposit
         vm.prank(reserveDepositor);
-        treasury.deposit(1000e18, address(ibgt), 10_000e9);
+        treasury.deposit(1000e18, address(ibgt), 1000e9);
 
         // Borrow
         vm.prank(reservesManager);
@@ -365,7 +365,7 @@ contract ApiaryTreasuryTest is Test {
 
     function testRevert_BorrowReserves_NotManager() public {
         vm.prank(reserveDepositor);
-        treasury.deposit(1000e18, address(ibgt), 10_000e9);
+        treasury.deposit(1000e18, address(ibgt), 1000e9);
 
         vm.prank(attacker);
         vm.expectRevert(ApiaryTreasury.APIARY__UNAUTHORIZED_RESERVE_MANAGER.selector);
@@ -379,7 +379,7 @@ contract ApiaryTreasuryTest is Test {
     function test_PullIBGTForStaking() public {
         // First deposit
         vm.prank(reserveDepositor);
-        treasury.deposit(1000e18, address(ibgt), 10_000e9);
+        treasury.deposit(1000e18, address(ibgt), 1000e9);
 
         uint256 pullAmount = 500e18;
 
@@ -399,7 +399,7 @@ contract ApiaryTreasuryTest is Test {
     function test_ReturnIBGTFromStaking() public {
         // First deposit
         vm.prank(reserveDepositor);
-        treasury.deposit(1000e18, address(ibgt), 10_000e9);
+        treasury.deposit(1000e18, address(ibgt), 1000e9);
 
         // Pull for staking
         vm.prank(yieldManager);
@@ -424,7 +424,7 @@ contract ApiaryTreasuryTest is Test {
 
     function testRevert_PullIBGTForStaking_InsufficientBalance() public {
         vm.prank(reserveDepositor);
-        treasury.deposit(1000e18, address(ibgt), 10_000e9);
+        treasury.deposit(1000e18, address(ibgt), 1000e9);
 
         vm.prank(yieldManager);
         vm.expectRevert(ApiaryTreasury.APIARY__INSUFFICIENT_IBGT_AVAILABLE.selector);
@@ -433,7 +433,7 @@ contract ApiaryTreasuryTest is Test {
 
     function testRevert_ReturnIBGTFromStaking_InsufficientStaked() public {
         vm.prank(reserveDepositor);
-        treasury.deposit(1000e18, address(ibgt), 10_000e9);
+        treasury.deposit(1000e18, address(ibgt), 1000e9);
 
         vm.prank(yieldManager);
         treasury.pullIBGTForStaking(500e18);
@@ -445,7 +445,7 @@ contract ApiaryTreasuryTest is Test {
 
     function testRevert_ReturnIBGTFromStaking_InvalidPrincipal() public {
         vm.prank(reserveDepositor);
-        treasury.deposit(1000e18, address(ibgt), 10_000e9);
+        treasury.deposit(1000e18, address(ibgt), 1000e9);
 
         vm.prank(yieldManager);
         treasury.pullIBGTForStaking(500e18);
@@ -457,7 +457,7 @@ contract ApiaryTreasuryTest is Test {
 
     function testRevert_PullIBGTForStaking_NotYieldManager() public {
         vm.prank(reserveDepositor);
-        treasury.deposit(1000e18, address(ibgt), 10_000e9);
+        treasury.deposit(1000e18, address(ibgt), 1000e9);
 
         vm.prank(attacker);
         vm.expectRevert(ApiaryTreasury.APIARY__UNAUTHORIZED_YIELD_MANAGER.selector);
@@ -586,7 +586,7 @@ contract ApiaryTreasuryTest is Test {
 
     function test_GetIBGTBalance() public {
         vm.prank(reserveDepositor);
-        treasury.deposit(1000e18, address(ibgt), 10_000e9);
+        treasury.deposit(1000e18, address(ibgt), 1000e9);
 
         assertEq(treasury.getIBGTBalance(), 1000e18);
     }
@@ -597,14 +597,14 @@ contract ApiaryTreasuryTest is Test {
 
     function test_GetLPBalance() public {
         vm.prank(liquidityDepositor);
-        treasury.deposit(1000e18, address(lpToken), 10_000e9);
+        treasury.deposit(1000e18, address(lpToken), 1000e9);
 
         assertEq(treasury.getLPBalance(), 1000e18);
     }
 
     function test_GetIBGTAccounting() public {
         vm.prank(reserveDepositor);
-        treasury.deposit(1000e18, address(ibgt), 10_000e9);
+        treasury.deposit(1000e18, address(ibgt), 1000e9);
 
         IApiaryTreasury.IBGTAccounting memory accounting = treasury.getIBGTAccounting();
 
@@ -619,9 +619,10 @@ contract ApiaryTreasuryTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function testFuzz_Deposit(uint256 amount, uint256 value) public {
-        // Bound to reasonable amounts
+        // Bound to reasonable amounts respecting maxMintRatioBps (120% of normalized amount)
         amount = bound(amount, 1e18, 100_000e18);
-        value = bound(value, 1e9, 1_000_000e9);
+        uint256 maxValue = (amount * 12000) / (10_000 * 1e9);
+        value = bound(value, 1e9, maxValue);
 
         // Make sure depositor has enough
         ibgt.mint(reserveDepositor, amount);
@@ -638,10 +639,11 @@ contract ApiaryTreasuryTest is Test {
         pullAmount = bound(pullAmount, 1e18, depositAmount);
         rewards = bound(rewards, 0, 10_000e18);
 
-        // Deposit
+        // Deposit with value within maxMintRatioBps (120% of normalized amount)
+        uint256 depositValue = (depositAmount * 10000) / (10_000 * 1e9); // 1:1 ratio
         ibgt.mint(reserveDepositor, depositAmount);
         vm.prank(reserveDepositor);
-        treasury.deposit(depositAmount, address(ibgt), 10_000e9);
+        treasury.deposit(depositAmount, address(ibgt), depositValue);
 
         // Pull
         vm.prank(yieldManager);

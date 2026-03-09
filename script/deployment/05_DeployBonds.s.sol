@@ -128,7 +128,7 @@ contract DeployBonds is Script {
         require(preSaleBond.treasury() == treasury, "Pre-Sale: Treasury not set");
         require(preSaleBond.owner() == admin, "Pre-Sale: Owner not set");
         require(preSaleBond.merkleRoot() == merkleRoot, "Pre-Sale: Merkle root not set");
-        require(preSaleBond.tokenPrice() == 25e16, "Pre-Sale: Default price incorrect");
+        require(preSaleBond.tokenPrice() == 50e16, "Pre-Sale: Default price incorrect ($0.50)");
         require(preSaleBond.isWhitelistEnabled(), "Pre-Sale: Whitelist should be enabled");
         
         console.log(unicode"\n✓ All bond contracts deployed successfully!");

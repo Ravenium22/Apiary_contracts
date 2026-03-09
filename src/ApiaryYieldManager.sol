@@ -487,10 +487,14 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         }
 
         // Calculate splits using BASIS_POINTS (cache splitConfig in memory)
+        // M-01 Audit Fix: Explicitly compute LP amount from config instead of remainder.
+        // Using remainder would silently absorb any non-zero Phase 2 fields (toStakers, toCompound)
+        // into LP creation if they were set while still running Phase 1 strategy.
         SplitConfig memory config = splitConfig;
         uint256 toHoneyAmount = (totalYield * config.toHoney) / BASIS_POINTS;
         uint256 toBurnAmount = (totalYield * config.toBurn) / BASIS_POINTS;
-        uint256 toLPAmount = totalYield - toHoneyAmount - toBurnAmount;
+        uint256 toLPAmount = (totalYield * config.toApiaryLP) / BASIS_POINTS;
+        // Any dust from rounding goes to treasury via remaining HONEY path below
 
         // 1. Swap 25% to HONEY (reverts on failure - atomic)
         honeySwapped = _swapToHoney(toHoneyAmount);
@@ -714,10 +718,10 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
             revert APIARY__CLAIM_FAILED();
         }
 
-        // Verify minimum amount received
-        if (claimedAmount < expectedAmount) {
-            revert APIARY__CLAIM_FAILED();
-        }
+        // H-02 Audit Fix: Removed cross-denomination comparison (claimedAmount < expectedAmount).
+        // pendingYield() now only counts iBGT, and claimedAmount includes iBGT + swapped non-iBGT.
+        // claimedAmount will always be >= the iBGT-only pending amount (plus any swap proceeds).
+        // Individual swap slippage checks already protect against loss on each swap.
     }
 
     /**
@@ -1196,15 +1200,20 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Get pending yield from Infrared adapter
+     * @notice Get pending yield from Infrared adapter (iBGT-denominated only)
+     * @dev H-02 Audit Fix: Only counts iBGT rewards to avoid mixing denominations.
+     *      Non-iBGT rewards are handled during claim (swapped or forwarded to treasury)
+     *      but excluded from the pending amount to prevent DoS in executeYield().
      * @return pendingAmount Amount of iBGT claimable
      */
     function pendingYield() public view returns (uint256 pendingAmount) {
         if (infraredAdapter == address(0)) return 0;
 
-        (, uint256[] memory amounts) = IApiaryInfraredAdapter(infraredAdapter).pendingRewards();
-        for (uint256 i = 0; i < amounts.length; i++) {
-            pendingAmount += amounts[i];
+        (address[] memory tokens, uint256[] memory amounts) = IApiaryInfraredAdapter(infraredAdapter).pendingRewards();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (tokens[i] == address(ibgtToken)) {
+                pendingAmount += amounts[i];
+            }
         }
     }
 

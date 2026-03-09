@@ -229,10 +229,12 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
                 uint256 calculatedValue = lpCalculator.valuation(_token, _amount);
                 maxReasonableValue = (calculatedValue * maxMintRatioBps) / 10000;
             } else {
-                // For reserve tokens (iBGT), apply partial decimal correction (3 of 9)
-                // to catch decimal-scale confusion while leaving 1e6 implicit tolerance
-                // that absorbs any realistic iBGT/APIARY price ratio without tuning
-                maxReasonableValue = (_amount * maxMintRatioBps) / (10_000 * 1e3);
+                // H-01 Audit Fix: Full 18→9 decimal normalization for reserve tokens (iBGT).
+                // iBGT has 18 decimals, APIARY has 9 decimals → divide by 1e9 to normalize.
+                // With maxMintRatioBps=12000 (120%), depositing 1 iBGT (1e18) allows max
+                // 1.2e9 APIARY (~1.2 APIARY), which is a proper 120% tolerance on the
+                // deposit's APIARY-equivalent value.
+                maxReasonableValue = (_amount * maxMintRatioBps) / (10_000 * 1e9);
             }
             if (value > maxReasonableValue) {
                 revert APIARY__EXCESSIVE_MINT_RATIO();

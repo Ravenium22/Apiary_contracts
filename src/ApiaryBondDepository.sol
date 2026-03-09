@@ -767,9 +767,11 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         if (totalSupply == 0) return; // No supply yet, skip check
 
         // Reset counter if a new day has started
+        // M-04 Audit Fix: Reset to scheduled boundary (not current block) to prevent
+        // clock drift and boundary-gaming (depositing 2x the daily cap across a reset).
         if (block.number >= dailyIssuanceResetBlock + blocksPerDay) {
             dailyIssuanceAmount = 0;
-            dailyIssuanceResetBlock = block.number;
+            dailyIssuanceResetBlock = dailyIssuanceResetBlock + blocksPerDay;
         }
 
         // Max daily = totalSupply * maxDailyIssuanceBps / BPS
