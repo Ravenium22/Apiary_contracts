@@ -14,15 +14,19 @@ out/
 # Docs
 docs/
 
+# Markdown files (keep README.md)
+*.md
+!README.md
+
 # Environment files - NEVER commit these!
 .env
-.env.local
-.env.*.local
+.env.*
 *.env
 
 # Node
 node_modules/
 package-lock.json
+yarn.lock
 
 # IDE
 .idea/
@@ -36,6 +40,20 @@ MerkleTreePreSaleBondWhitelistAddressesTest.txt
 MerkleTreePreSaleOwners.txt
 lcov.info
 coverage/
+test.csv
+merkle-tree-output.json
 
 # Sensitive deployment data
 /cache/**/run-latest.json
+
+# Broadcast deployment logs (contain addresses/tx hashes)
+/broadcast/
+
+# PDF documents
+*.pdf
+
+# Home directory (accidentally added)
+~/
+
+# Claude/AI tool configs
+.claude/

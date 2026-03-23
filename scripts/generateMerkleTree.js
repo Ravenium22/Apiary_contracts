@@ -35,25 +35,45 @@ const fs = require('fs');
  * - YeetDat team/community addresses
  * - BoogaBullas NFT holders or team addresses
  */
-const WHITELIST_ADDRESSES = [
-    // ===== PLUG ADDRESSES =====
-    '0x1111111111111111111111111111111111111111',
-    '0x2222222222222222222222222222222222222222',
-    
-    // ===== APDAO ADDRESSES =====
-    '0x3333333333333333333333333333333333333333',
-    '0x4444444444444444444444444444444444444444',
-    
-    // ===== YEETDAT ADDRESSES =====
-    '0x5555555555555555555555555555555555555555',
-    '0x6666666666666666666666666666666666666666',
-    
-    // ===== BOOGABULLAS ADDRESSES =====
-    '0x7777777777777777777777777777777777777777',
-    '0x8888888888888888888888888888888888888888',
-    
-    // Add more addresses as needed...
+// Load addresses from test.csv (or override with manual list below)
+function loadAddressesFromCSV(csvPath) {
+    const csv = fs.readFileSync(csvPath, 'utf8');
+    const lines = csv.trim().split('\n');
+    const addresses = [];
+    // Skip header row
+    for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(',');
+        const addr = cols[0].replace(/"/g, '').trim();
+        if (addr && ethers.utils.isAddress(addr) && addr !== '0x000000000000000000000000000000000000dead') {
+            addresses.push(addr);
+        }
+    }
+    return addresses;
+}
+
+const CSV_PATH = './test.csv';
+const EXTRA_ADDRESSES = [
+    // Deployer address for testing
+    '0xe098B97D835CEA2c938A12E15d0da8B3F67a69B5',
 ];
+
+let WHITELIST_ADDRESSES;
+if (fs.existsSync(CSV_PATH)) {
+    console.log(`Loading addresses from ${CSV_PATH}...`);
+    WHITELIST_ADDRESSES = [...loadAddressesFromCSV(CSV_PATH), ...EXTRA_ADDRESSES];
+} else {
+    console.log('No CSV found, using EXTRA_ADDRESSES only');
+    WHITELIST_ADDRESSES = EXTRA_ADDRESSES;
+}
+
+// Deduplicate (case-insensitive)
+const seen = new Set();
+WHITELIST_ADDRESSES = WHITELIST_ADDRESSES.filter(addr => {
+    const lower = addr.toLowerCase();
+    if (seen.has(lower)) return false;
+    seen.add(lower);
+    return true;
+});
 
 // ============================================================================
 // MERKLE TREE GENERATION

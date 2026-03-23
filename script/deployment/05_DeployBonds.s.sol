@@ -47,7 +47,8 @@ contract DeployBonds is Script {
         address admin = vm.envAddress("DEPLOYER_ADDRESS");
         bytes32 merkleRoot = vm.envBytes32("MERKLE_ROOT");
         address ibgtPriceFeed = vm.envAddress("IBGT_PRICE_FEED");
-        
+        address bondingCalculator = vm.envAddress("BONDING_CALCULATOR_ADDRESS");
+
         console.log("=== Deploying Bond Contracts ===");
         console.log("APIARY:", apiary);
         console.log("Treasury:", treasury);
@@ -79,15 +80,14 @@ contract DeployBonds is Script {
         console.log("2. iBGT Bond Depository deployed:", address(ibgtBond));
 
         // Deploy LP Bond Depository
-        // Note: Bond calculator contract would need to be deployed separately
         ApiaryBondDepository lpBond = new ApiaryBondDepository(
             apiary,             // APIARY token
             apiaryHoneyLP,      // Principle (LP token)
             treasury,           // Treasury
             admin,              // Admin/Owner
-            address(0),         // Bond calculator (deploy separately if needed)
+            bondingCalculator,  // Bond calculator for LP valuation
             address(twapOracle),// TWAP oracle
-            address(0)          // No iBGT price feed for LP bonds
+            address(0)          // No iBGT price feed for LP bonds (isLiquidityBond=true skips check)
         );
         
         console.log("3. LP Bond Depository deployed:", address(lpBond));

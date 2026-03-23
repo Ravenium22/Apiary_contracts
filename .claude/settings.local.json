@@ -26,7 +26,12 @@
       "Bash(python -c:*)",
       "Bash(python3:*)",
       "Bash(pip install:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(source .env)",
+      "Bash(__NEW_LINE_e131841352c6a89f__ echo:*)",
+      "Bash(cast call:*)",
+      "Bash(__NEW_LINE_884b8a2138a34a48__ echo:*)",
+      "Bash(cast send:*)"
     ]
   }
 }

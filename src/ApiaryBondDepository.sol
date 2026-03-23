@@ -194,6 +194,13 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Block number when the daily issuance counter was last reset
     uint256 public dailyIssuanceResetBlock;
 
+    /// @notice When true, bonds cannot be sold below treasury backing per token
+    bool public backingFloorEnabled;
+
+    /// @notice Buffer above backing price in bps (e.g., 500 = 5% above backing)
+    /// @dev Bond price must be >= backingPerToken * (10000 + buffer) / 10000
+    uint256 public backingFloorBufferBps;
+
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -226,6 +233,8 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__BONDS_PAUSED_HIGH_DEBT();
     /// @notice Daily issuance cap exceeded (max 3% of total APIARY supply per day)
     error APIARY__DAILY_ISSUANCE_EXCEEDED();
+    /// @notice Bond price is below treasury backing per token
+    error APIARY__BELOW_BACKING_FLOOR();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -268,6 +277,7 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     event PriceFeedStalenessThresholdUpdated(uint256 oldThreshold, uint256 newThreshold);
     /// @notice Emitted when max daily issuance bps is updated
     event MaxDailyIssuanceBpsUpdated(uint256 oldBps, uint256 newBps);
+    event BackingFloorUpdated(bool enabled, uint256 bufferBps);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -384,6 +394,11 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 _maxPayout = maxPayout();
         if (_maxPayout == 0) revert APIARY__BOND_SOLD_OUT();
         if (payOut > _maxPayout) revert APIARY__BOND_TOO_LARGE();
+
+        // Backing floor check: prevent bonds below treasury backing per token
+        if (backingFloorEnabled) {
+            _checkBackingFloor(discountedPriceInHoney);
+        }
 
         // Daily issuance cap: max 3% of total APIARY supply per day
         _checkAndUpdateDailyIssuance(payOut);
@@ -673,6 +688,20 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
+     * @notice Enable/disable backing price floor and set buffer
+     * @dev When enabled, bonds cannot be sold at a price below treasury backing per token.
+     *      Buffer adds a safety margin (e.g., 500 = 5% above backing).
+     * @param _enabled True to enable backing floor check
+     * @param _bufferBps Buffer above backing in basis points (0-5000)
+     */
+    function setBackingFloor(bool _enabled, uint256 _bufferBps) external onlyOwner {
+        if (_bufferBps > 5000) revert APIARY__INVALID_AMOUNT(); // Max 50% buffer
+        backingFloorEnabled = _enabled;
+        backingFloorBufferBps = _bufferBps;
+        emit BackingFloorUpdated(_enabled, _bufferBps);
+    }
+
+    /**
      * @notice Enable or disable dynamic debt-ratio based discounts
      * @dev When enabled, discount rates are determined by debt ratio tiers:
      *      - 0-3% debt: 8% discount
@@ -782,6 +811,56 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         }
 
         dailyIssuanceAmount += newPayout;
+    }
+
+    /**
+     * @notice Check that the bond's discounted price is not below treasury backing per token
+     * @dev Calculates backing = treasuryValue / totalSupply, applies buffer, reverts if bond price is below.
+     *      Uses cached oracle prices to avoid extra external calls.
+     * @param discountedPriceInHoney The bond price after discount (18 decimals, HONEY per APIARY)
+     */
+    function _checkBackingFloor(uint256 discountedPriceInHoney) internal view {
+        uint256 totalSupply = IERC20(APIARY).totalSupply();
+        if (totalSupply == 0) return; // No supply = no backing to protect
+
+        // Estimate treasury value in HONEY (18 decimals) using cached prices
+        uint256 treasuryValueHoney = _estimateTreasuryValueInHoney();
+        if (treasuryValueHoney == 0) return; // Can't compute backing, skip
+
+        // backingPerToken = treasuryValue(18-dec) * 1e9 / totalSupply(9-dec) = 18-dec HONEY per APIARY
+        uint256 backingPerToken = treasuryValueHoney.mulDiv(1e9, totalSupply);
+
+        // Apply buffer: floor = backing * (10000 + buffer) / 10000
+        uint256 floor = backingPerToken.mulDiv(BPS + backingFloorBufferBps, BPS);
+
+        if (discountedPriceInHoney < floor) {
+            revert APIARY__BELOW_BACKING_FLOOR();
+        }
+    }
+
+    /**
+     * @notice Estimate total treasury value of this bond's principle reserves in HONEY
+     * @dev Uses cached oracle prices. Returns 0 if prices not available.
+     * @return valueInHoney Treasury reserves value in HONEY (18 decimals)
+     */
+    function _estimateTreasuryValueInHoney() internal view returns (uint256 valueInHoney) {
+        uint256 reserves = IApiaryTreasury(treasury).totalReserves(principle);
+        if (reserves == 0) return 0;
+
+        if (isLiquidityBond) {
+            // LP valuation returns APIARY-equivalent (9-dec), convert to HONEY using cached price
+            uint256 valueInApiary = IApiaryBondingCalculator(bondCalculator).valuation(principle, reserves);
+            uint256 cachedApiary = lastCachedApiaryPrice;
+            if (cachedApiary == 0) return 0;
+            // APIARY(9-dec) * apiaryPrice(18-dec) / 1e9 = HONEY(18-dec)
+            return valueInApiary.mulDiv(cachedApiary, 1e9);
+        } else {
+            // iBGT: convert using cached iBGT price
+            uint256 cachedIbgt = lastCachedIbgtPrice;
+            if (cachedIbgt == 0) return 0;
+            // reserves(18-dec) * ibgtPrice / feedDecimals = HONEY(18-dec)
+            return reserves.mulDiv(cachedIbgt, 10 ** ibgtPriceFeedDecimals);
+        }
     }
 
     /**
