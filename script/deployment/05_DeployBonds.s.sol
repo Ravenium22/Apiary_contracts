@@ -58,9 +58,9 @@ contract DeployBonds is Script {
         vm.startBroadcast();
         
         // Deploy TWAP Oracle first (required by bond depositories)
-        // Constructor only takes the LP pair address
         ApiaryUniswapV2TwapOracle twapOracle = new ApiaryUniswapV2TwapOracle(
-            apiaryHoneyLP
+            apiaryHoneyLP,
+            apiary
         );
         
         console.log("\n1. TWAP Oracle deployed:", address(twapOracle));

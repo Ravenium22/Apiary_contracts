@@ -204,7 +204,8 @@ contract DeployAll is Script {
         if (hasRealLP) {
             console.log("STEP 7: Deploying TWAP Oracle...");
             ApiaryUniswapV2TwapOracle twapOracle = new ApiaryUniswapV2TwapOracle(
-                deployed.apiaryHoneyLP
+                deployed.apiaryHoneyLP,
+                deployed.apiary
             );
             deployed.twapOracle = address(twapOracle);
             console.log("  TWAP Oracle:", deployed.twapOracle);

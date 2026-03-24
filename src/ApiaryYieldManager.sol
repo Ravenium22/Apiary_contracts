@@ -696,20 +696,45 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
                         address(this)
                     );
                 } catch {
-                    // Direct swap failed — try through HONEY
-                    address[] memory path = new address[](3);
-                    path[0] = rewardTokens[i];
-                    path[1] = address(honeyToken);
-                    path[2] = address(ibgtToken);
+                    // Direct swap failed — try two-step through HONEY with proper quoting.
+                    // Previous code used input token amount as minOut floor on the final iBGT
+                    // output, which is incommensurable and can cause reverts when the reward
+                    // token trades at a different scale than iBGT.
+                    try IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
+                        rewardTokens[i],
+                        address(honeyToken),
+                        rewardAmounts[i]
+                    ) returns (uint256 honeyExpected) {
+                        uint256 minHoney = _calculateMinOutput(honeyExpected);
 
-                    // M-04 Fix: Use emergency slippage tolerance instead of zero
-                    uint256 minOut = (rewardAmounts[i] * (BASIS_POINTS - emergencySlippageBps)) / BASIS_POINTS;
-                    claimedAmount += IApiaryKodiakAdapter(kodiakAdapter).swapMultiHop(
-                        path,
-                        rewardAmounts[i],
-                        minOut,
-                        address(this)
-                    );
+                        uint256 honeyReceived = IApiaryKodiakAdapter(kodiakAdapter).swap(
+                            rewardTokens[i],
+                            address(honeyToken),
+                            rewardAmounts[i],
+                            minHoney,
+                            address(this)
+                        );
+
+                        // Second leg: HONEY → iBGT
+                        IERC20(address(honeyToken)).forceApprove(kodiakAdapter, honeyReceived);
+                        uint256 ibgtExpected = IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
+                            address(honeyToken),
+                            address(ibgtToken),
+                            honeyReceived
+                        );
+                        uint256 minIbgt = _calculateMinOutput(ibgtExpected);
+
+                        claimedAmount += IApiaryKodiakAdapter(kodiakAdapter).swap(
+                            address(honeyToken),
+                            address(ibgtToken),
+                            honeyReceived,
+                            minIbgt,
+                            address(this)
+                        );
+                    } catch {
+                        // Neither direct nor HONEY route available — skip this reward token.
+                        // It remains in the YieldManager for manual recovery by owner.
+                    }
                 }
             }
         }
@@ -1077,6 +1102,9 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         nonReentrant
         returns (uint256 totalAmount)
     {
+        if (msg.sender != keeper && msg.sender != owner()) {
+            revert APIARY__ONLY_KEEPER_OR_OWNER();
+        }
         if (kodiakAdapter == address(0)) {
             revert APIARY__ADAPTER_NOT_SET();
         }

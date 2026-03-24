@@ -58,38 +58,34 @@ contract ApiaryBondingCalculator is IApiaryBondingCalculator {
 
         (uint112 reserve0, uint112 reserve1,) = IUniswapV2Pair(pair_).getReserves();
 
-        // Fair LP value = 2 * sqrt(reserve0 * reserve1) * amount / totalSupply
-        // Using Babylonian sqrt for precision
-        uint256 sqrtK = Babylonian.sqrt(uint256(reserve0) * uint256(reserve1));
-
         // Get token decimals to normalize to APIARY (9 decimals)
         address token0 = IUniswapV2Pair(pair_).token0();
         address token1 = IUniswapV2Pair(pair_).token1();
         uint8 decimals0 = IERC20Metadata(token0).decimals();
         uint8 decimals1 = IERC20Metadata(token1).decimals();
 
-        // sqrtK is in sqrt(decimals0 * decimals1) units
-        // We want result in 9-decimal APIARY terms
-        // Normalize: sqrtK is in 10^((decimals0 + decimals1)/2) units
-        // We need to scale to 9 decimals
+        uint256 totalDecimals = uint256(decimals0) + uint256(decimals1);
 
-        // Calculate value = 2 * sqrtK * amount / totalSupply
-        // Scale to 9 decimals from native units
-        uint256 avgDecimals = (uint256(decimals0) + uint256(decimals1));
+        // Fair LP value = 2 * sqrt(reserve0 * reserve1) * amount / totalSupply
+        // sqrtK has decimal precision of totalDecimals / 2.
+        // When totalDecimals is odd (e.g. 9+18=27), integer division truncates
+        // the precision (13 instead of 13.5), inflating the result by ~sqrt(10).
+        // Fix: scale one reserve by 10 so the product has even total decimals,
+        // giving sqrtK a clean integer decimal precision.
+        uint256 r0 = uint256(reserve0);
+        uint256 r1 = uint256(reserve1);
+        if (totalDecimals % 2 != 0) {
+            r0 = r0 * 10;
+            totalDecimals += 1;
+        }
 
-        // value_raw = 2 * sqrtK * amount / totalSupply
-        // This is in 10^((d0+d1)/2) units
-        // To convert to 9 decimals: multiply by 10^9 / 10^((d0+d1)/2)
-        // = multiply by 10^(9 - (d0+d1)/2) if 9 > (d0+d1)/2
-        // = divide by 10^((d0+d1)/2 - 9) if (d0+d1)/2 > 9
+        uint256 sqrtK = Babylonian.sqrt(r0 * r1);
 
         // Compute 2 * sqrtK * amount / totalSupply with full precision
         _value = (2 * sqrtK * amount_) / totalSupply;
 
-        // Scale to 9 decimals
-        // sqrtK decimal precision = avgDecimals / 2
-        // If avgDecimals is odd, we lose a bit of precision (acceptable)
-        uint256 sqrtDecimals = avgDecimals / 2;
+        // Scale to 9 decimals. sqrtK decimal precision = totalDecimals / 2 (exact integer).
+        uint256 sqrtDecimals = totalDecimals / 2;
 
         if (sqrtDecimals > 9) {
             _value = _value / (10 ** (sqrtDecimals - 9));

@@ -795,12 +795,13 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 totalSupply = IERC20(APIARY).totalSupply();
         if (totalSupply == 0) return; // No supply yet, skip check
 
-        // Reset counter if a new day has started
-        // M-04 Audit Fix: Reset to scheduled boundary (not current block) to prevent
-        // clock drift and boundary-gaming (depositing 2x the daily cap across a reset).
-        if (block.number >= dailyIssuanceResetBlock + blocksPerDay) {
+        // Reset counter if a new day has started.
+        // Uses bucket-based calculation to jump directly to the current period,
+        // preventing multi-reset bypass when dailyIssuanceResetBlock lags behind.
+        uint256 currentBucket = block.number - (block.number % blocksPerDay);
+        if (dailyIssuanceResetBlock == 0 || currentBucket > dailyIssuanceResetBlock) {
             dailyIssuanceAmount = 0;
-            dailyIssuanceResetBlock = dailyIssuanceResetBlock + blocksPerDay;
+            dailyIssuanceResetBlock = currentBucket;
         }
 
         // Max daily = totalSupply * maxDailyIssuanceBps / BPS
@@ -982,21 +983,21 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
 
     /**
      * @notice Calculate current debt ratio
-     * @dev Debt ratio = (totalDebt / treasuryReserves) * BPS
-     *      Uses treasury's total reserves for iBGT as denominator
+     * @dev Debt ratio = (totalDebt / reserveValueInApiary) * BPS
+     *      Both numerator and denominator are in APIARY (9 decimals) for correct comparison.
+     *      Uses _estimateTreasuryValueInApiary() to convert raw reserves to APIARY terms
+     *      via cached oracle prices (iBGT bonds) or bonding calculator (LP bonds).
      * @return ratio Debt ratio in basis points
      */
     function _calculateDebtRatio() internal view returns (uint256 ratio) {
-        // Get treasury's total iBGT reserves
-        uint256 treasuryReserves = IApiaryTreasury(treasury).totalReserves(principle);
+        uint256 reserveValueInApiary = _estimateTreasuryValueInApiary();
 
-        if (treasuryReserves == 0) {
-            // No reserves = infinite debt ratio = paused
+        if (reserveValueInApiary == 0) {
+            // No reserves or no cached prices = infinite debt ratio = paused
             return type(uint256).max;
         }
 
-        // Calculate ratio: (totalDebt / treasuryReserves) * BPS
-        ratio = totalDebt.mulDiv(BPS, treasuryReserves);
+        ratio = totalDebt.mulDiv(BPS, reserveValueInApiary);
     }
 
     /**

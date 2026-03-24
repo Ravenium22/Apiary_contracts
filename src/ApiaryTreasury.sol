@@ -228,12 +228,23 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
                 // For LP tokens, use bonding calculator for valuation
                 uint256 calculatedValue = lpCalculator.valuation(_token, _amount);
                 maxReasonableValue = (calculatedValue * maxMintRatioBps) / 10000;
+            } else if (_token == IBGT && address(ibgtPriceFeed) != address(0)) {
+                // Use iBGT/USD oracle for accurate valuation (HONEY = $1 USD).
+                // Previous code assumed 1 iBGT ≈ 1 APIARY after decimal normalization,
+                // which freezes bonds when iBGT/APIARY price ratio exceeds maxMintRatioBps.
+                (, int256 answer,, uint256 updatedAt,) = ibgtPriceFeed.latestRoundData();
+                if (answer > 0 && (block.timestamp - updatedAt <= ibgtPriceFeedStaleness)) {
+                    // Convert iBGT deposit to 9-decimal APIARY-equivalent value:
+                    //   _amount(18-dec) * ibgtPrice / feedDecimals → USD value(18-dec)
+                    //   USD(18-dec) * 1e9 / 1e18 → APIARY-equivalent(9-dec)
+                    uint256 valueInApiary = (_amount * uint256(answer) * 1e9) / (10 ** ibgtPriceFeed.decimals() * 1e18);
+                    maxReasonableValue = (valueInApiary * maxMintRatioBps) / 10000;
+                } else {
+                    // Oracle unavailable/stale — fall back to decimal-normalized ratio
+                    maxReasonableValue = (_amount * maxMintRatioBps) / (10_000 * 1e9);
+                }
             } else {
-                // H-01 Audit Fix: Full 18→9 decimal normalization for reserve tokens (iBGT).
-                // iBGT has 18 decimals, APIARY has 9 decimals → divide by 1e9 to normalize.
-                // With maxMintRatioBps=12000 (120%), depositing 1 iBGT (1e18) allows max
-                // 1.2e9 APIARY (~1.2 APIARY), which is a proper 120% tolerance on the
-                // deposit's APIARY-equivalent value.
+                // Non-iBGT reserve tokens or no oracle: decimal-normalized ratio
                 maxReasonableValue = (_amount * maxMintRatioBps) / (10_000 * 1e9);
             }
             if (value > maxReasonableValue) {

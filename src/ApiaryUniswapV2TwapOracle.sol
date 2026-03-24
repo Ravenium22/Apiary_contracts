@@ -36,11 +36,21 @@ contract ApiaryUniswapV2TwapOracle is IApiaryUniswapV2TwapOracle {
     error APIARY__ORACLE_STALE();
     /// @notice M-01 Fix: Oracle needs more TWAP updates before it's reliable
     error APIARY__ORACLE_NOT_READY();
+    /// @notice Pair token0 must be APIARY so price0Average = HONEY per APIARY
+    error APIARY__INVALID_PAIR_ORDER();
 
-    constructor(address _apiaryHoneyPair) {
-        if (_apiaryHoneyPair == address(0)) revert APIARY__ZERO_ADDRESS();
+    /**
+     * @param _apiaryHoneyPair Uniswap V2 / Kodiak pair address
+     * @param _apiary APIARY token address — must equal pair.token0() so that
+     *        price0Average gives "HONEY per APIARY" (the direction all callers expect).
+     */
+    constructor(address _apiaryHoneyPair, address _apiary) {
+        if (_apiaryHoneyPair == address(0) || _apiary == address(0)) revert APIARY__ZERO_ADDRESS();
 
         APIARY_HONEY_PAIR = IUniswapV2Pair(_apiaryHoneyPair);
+
+        // Validate pair ordering: token0 must be APIARY so that price0 = HONEY/APIARY
+        if (APIARY_HONEY_PAIR.token0() != _apiary) revert APIARY__INVALID_PAIR_ORDER();
 
         price0CumulativeLast = APIARY_HONEY_PAIR.price0CumulativeLast();
 
