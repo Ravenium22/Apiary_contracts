@@ -410,12 +410,18 @@ contract sApiary is ERC20Permit, Ownable2Step {
         uint256 gonValue = gonsForBalance(value);
         require(_gonBalances[from] >= gonValue, "sApiary: insufficient balance");
 
-        _allowedValue[from][msg.sender] = _allowedValue[from][msg.sender] - value;
-        emit Approval(from, msg.sender, _allowedValue[from][msg.sender]);
+        // FIX (Finding 6): Skip allowance deduction for infinite approvals (type(uint256).max).
+        // Standard ERC20 implementations (OpenZeppelin, Solmate) skip deduction for max approval.
+        // Without this, any DeFi integration using max-approve patterns (routers, vaults, staking)
+        // will eventually exhaust the allowance, causing unexpected reverts.
+        if (_allowedValue[from][msg.sender] != type(uint256).max) {
+            _allowedValue[from][msg.sender] = _allowedValue[from][msg.sender] - value;
+            emit Approval(from, msg.sender, _allowedValue[from][msg.sender]);
+        }
 
         _gonBalances[from] = _gonBalances[from] - gonValue;
         _gonBalances[to] = _gonBalances[to] + gonValue;
-        
+
         emit Transfer(from, to, value);
 
         return true;

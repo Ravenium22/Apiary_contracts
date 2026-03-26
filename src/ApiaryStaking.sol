@@ -247,11 +247,25 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
      * @notice Internal rebase logic - trigger rebase if epoch has ended
      * @dev In Phase 1, distribute is always 0 (no yield)
      *      In Phase 2, distribute will be calculated based on profits
+     *      FIX: totalStaked is updated to track rebase profit so unstake() doesn't underflow
      */
     function _rebase() internal {
         if (epoch.endBlock <= block.number) {
+            // FIX (Finding 1 & 4): Track the distribution amount before rebase
+            uint256 distributeAmount = epoch.distribute;
+
             // Call rebase on sAPIARY contract
-            IsAPIARY(sAPIARY).rebase(epoch.distribute, epoch.number);
+            IsAPIARY(sAPIARY).rebase(distributeAmount, epoch.number);
+
+            // FIX (Finding 1 & 4): Update totalStaked to include rebased profit
+            // This prevents arithmetic underflow in unstake() when users withdraw
+            // their full rebased sAPIARY balance, and prevents retrieve() from
+            // treating rebased APIARY as drainable "excess"
+            if (distributeAmount > 0) {
+                uint256 oldTotalStaked = totalStaked;
+                totalStaked = totalStaked + distributeAmount;
+                emit TotalStakedUpdated(oldTotalStaked, totalStaked);
+            }
 
             // Move to next epoch
             epoch.endBlock = epoch.endBlock + epoch.length;
@@ -373,9 +387,13 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
      */
     function retrieve(address token, uint256 amount) external onlyOwner {
         // Prevent draining staked APIARY
+        // FIX (Finding 4): Use the greater of totalStaked and sAPIARY circulatingSupply
+        // as the protected amount, in case totalStaked ever drifts from the true obligation
         if (token == APIARY) {
             uint256 apiaryBalance = IERC20(APIARY).balanceOf(address(this));
-            uint256 excess = apiaryBalance > totalStaked ? apiaryBalance - totalStaked : 0;
+            uint256 circulating = IsAPIARY(sAPIARY).circulatingSupply();
+            uint256 obligation = totalStaked > circulating ? totalStaked : circulating;
+            uint256 excess = apiaryBalance > obligation ? apiaryBalance - obligation : 0;
             require(amount <= excess, "ApiaryStaking: cannot drain staked funds");
         }
 

@@ -254,6 +254,11 @@ contract ApiaryBondDepositoryTest is Test {
             MAX_DEBT
         );
 
+        // FIX (Finding 5): Set reference price so deposits don't revert
+        // Uses the mock TWAP price (0.25 HONEY per APIARY = 25e16)
+        vm.prank(admin);
+        bondDepository.setReferencePrice(25e16);
+
         // Pre-seed treasury with reserves for treasury-value-based maxPayout
         ibgt.mint(address(treasury), 100_000e18);
         treasury.setTotalReserves(address(ibgt), 100_000e18);
@@ -501,7 +506,7 @@ contract ApiaryBondDepositoryTest is Test {
         assertGt(bond.payout, 0);
         assertEq(bond.vestingStart, uint48(block.number));
         assertEq(bond.vestingEnd, uint48(block.number + VESTING_TERM));
-        assertFalse(bond.redeemed);
+        assertEq(bond.claimed, 0);
     }
 
     function test_Deposit_MultipleBonds() public {
@@ -532,6 +537,10 @@ contract ApiaryBondDepositoryTest is Test {
     function testRevert_Deposit_SlippageExceeded() public {
         // Set TWAP to high price
         twap.setPrice(1e18); // 1 HONEY per APIARY (higher than max)
+
+        // FIX: Update reference price to match new TWAP so deviation check passes
+        vm.prank(admin);
+        bondDepository.setReferencePrice(1e18);
 
         vm.prank(user1);
         vm.expectRevert(ApiaryBondDepository.APIARY__SLIPPAGE_LIMIT_EXCEEDED.selector);
@@ -641,8 +650,7 @@ contract ApiaryBondDepositoryTest is Test {
         bondDepository.redeem(0);
 
         ApiaryBondDepository.Bond memory bond = bondDepository.getUserBond(user1, 0);
-        assertTrue(bond.redeemed);
-        assertEq(bond.payout, 0);
+        assertEq(bond.claimed, bond.payout);  // Fully redeemed
     }
 
     function test_Redeem_DecreasesTotalDebt() public {
@@ -698,9 +706,9 @@ contract ApiaryBondDepositoryTest is Test {
         vm.prank(user1);
         bondDepository.redeem(0);
 
-        // After full redemption, payout is set to 0, so NO_REDEEMABLE_BOND is thrown first
+        // After full redemption, claimed == payout so BOND_ALREADY_REDEEMED is thrown
         vm.prank(user1);
-        vm.expectRevert(ApiaryBondDepository.APIARY__NO_REDEEMABLE_BOND.selector);
+        vm.expectRevert(ApiaryBondDepository.APIARY__BOND_ALREADY_REDEEMED.selector);
         bondDepository.redeem(0);
     }
 

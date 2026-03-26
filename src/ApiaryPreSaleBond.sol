@@ -259,8 +259,13 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
 
         // If user already has allocation, unlock vested tokens first
         // C-01 Fix: Call internal version to avoid nested nonReentrant
+        // FIX (Finding 3): Only attempt unlock if apiaryToken is set and TGE started,
+        // otherwise _unlockApiaryInternal() reverts with APIARY__TOKEN_NOT_SET,
+        // blocking repeat purchases during pre-sale (before token is deployed)
         if (_investorAllocations[msg.sender].totalAmount != 0) {
-            _unlockApiaryInternal();
+            if (address(apiaryToken) != address(0) && tgeStarted) {
+                _unlockApiaryInternal();
+            }
         }
 
         // LOW-04 Fix: Apply caps sequentially, calculate refund once at the end
@@ -273,6 +278,12 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
         uint256 remainingAllocation = bondPurchaseLimit - _investorAllocations[msg.sender].totalAmount;
         if (apiaryPurchaseAmount > remainingAllocation) {
             apiaryPurchaseAmount = remainingAllocation;
+        }
+
+        // CODEX-LOW-04 Fix: Re-check minimum output after both caps are applied.
+        // Without this, caps could reduce the amount below the user's slippage tolerance.
+        if (apiaryPurchaseAmount < minApiaryAmount) {
+            revert APIARY__SLIPPAGE_EXCEEDED();
         }
 
         // Single refund calculation based on final capped amount
@@ -358,8 +369,15 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
      * @notice Mint total sold APIARY to contract for vesting distribution
      * @dev Called after pre-sale ends, before TGE starts
      * @dev Only mints exactly what was sold, no excess
+     * @dev CODEX-NOTE Fix: Can only be called once to prevent double-minting
      */
+    bool public apiaryMinted;
+    error APIARY__ALREADY_MINTED();
+
     function mintApiary() external onlyOwner {
+        if (apiaryMinted) revert APIARY__ALREADY_MINTED();
+        apiaryMinted = true;
+
         apiaryToken.mint(address(this), totalBondsSold);
 
         emit TotalApiaryMinted(totalBondsSold);

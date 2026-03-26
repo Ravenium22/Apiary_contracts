@@ -10,6 +10,7 @@ import { IApiaryTreasury } from "./interfaces/IApiaryTreasury.sol";
 import { IApiaryUniswapV2TwapOracle } from "./interfaces/IApiaryUniswapV2TwapOracle.sol";
 import { IApiaryBondingCalculator } from "./interfaces/IApiaryBondingCalculator.sol";
 import { IAggregatorV3 } from "./interfaces/IAggregatorV3.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @title ApiaryTreasury
@@ -611,10 +612,11 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
         uint256 lpBalance = IERC20(APIARY_HONEY_LP).balanceOf(address(this));
         uint256 lpValue = 0;
         if (lpBalance > 0 && address(lpCalculator) != address(0)) {
-            // Bonding calculator returns value in APIARY terms (9 decimals)
-            // Convert to HONEY using current price
-            uint256 lpValueInApiary = lpCalculator.valuation(APIARY_HONEY_LP, lpBalance);
-            lpValue = (lpValueInApiary * apiaryPrice) / 1e9;
+            // CODEX-HIGH-02 Fix: Calculator returns geometric mean (9-dec), not APIARY value.
+            // Convert to HONEY (18-dec): HONEY_value = geometric * sqrt(apiaryPrice)
+            // where geometric is 9-dec and sqrt(apiaryPrice_18dec) is 9-dec, product is 18-dec.
+            uint256 geometric = lpCalculator.valuation(APIARY_HONEY_LP, lpBalance);
+            lpValue = geometric * Math.sqrt(apiaryPrice);
         }
 
         treasuryValue = ibgtValue + lpValue;

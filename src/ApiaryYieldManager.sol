@@ -9,6 +9,8 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { IApiaryInfraredAdapter } from "./interfaces/IApiaryInfraredAdapter.sol";
 import { IApiaryKodiakAdapter } from "./interfaces/IApiaryKodiakAdapter.sol";
 import { IApiaryToken } from "./interfaces/IApiaryToken.sol";
+import { IAggregatorV3 } from "./interfaces/IAggregatorV3.sol";
+import { IApiaryUniswapV2TwapOracle } from "./interfaces/IApiaryUniswapV2TwapOracle.sol";
 
 /**
  * @title ApiaryYieldManager
@@ -175,6 +177,18 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Current protocol mode for Phase 2 (with hysteresis)
     ProtocolMode public currentMode;
 
+    /// @notice FIX (Finding 2): iBGT/USD Chainlink-compatible price feed for oracle-based slippage protection
+    IAggregatorV3 public ibgtPriceFeed;
+
+    /// @notice FIX (Finding 2): Cached decimals from iBGT price feed
+    uint8 public ibgtPriceFeedDecimals;
+
+    /// @notice FIX (Finding 2): TWAP oracle for APIARY price (manipulation-resistant)
+    IApiaryUniswapV2TwapOracle public twapOracle;
+
+    /// @notice FIX (Finding 2): Maximum staleness for iBGT price feed (default: 1 hour)
+    uint256 public yieldPriceFeedStaleness;
+
     /*//////////////////////////////////////////////////////////////
                     BUFFER ZONE THRESHOLDS (Phase 2)
     //////////////////////////////////////////////////////////////*/
@@ -306,6 +320,9 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     error APIARY__ONLY_KEEPER_OR_OWNER();
     /// @notice Invalid buffer zone thresholds
     error APIARY__INVALID_BUFFER_THRESHOLDS();
+    /// @notice FIX (Finding 2): iBGT price feed returned stale or invalid data
+    error APIARY__YIELD_STALE_PRICE_FEED();
+    error APIARY__YIELD_INVALID_PRICE();
 
     /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
@@ -762,13 +779,21 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
 
         if (amount == 0) return 0;
 
-        // Calculate minimum output using adapter's quote function
-        uint256 expectedOutput = IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
+        // FIX (Finding 2): Use oracle-based price floor instead of spot quote from the swap pool.
+        // Spot quotes from the same pool can be manipulated by sandwich attackers — both the
+        // quote and the execution reflect the manipulated price, making slippage checks useless.
+        // Oracle-based floor provides a manipulation-resistant minimum.
+        uint256 minOutput;
+        uint256 spotExpected = IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
             address(ibgtToken),
             address(honeyToken),
             amount
         );
-        uint256 minOutput = _calculateMinOutput(expectedOutput);
+        uint256 spotMin = _calculateMinOutput(spotExpected);
+
+        uint256 oracleMin = _getOracleMinOutputHoney(amount);
+        // Take the higher of spot-based and oracle-based minimums
+        minOutput = oracleMin > spotMin ? oracleMin : spotMin;
 
         // Approve Kodiak adapter
         ibgtToken.forceApprove(kodiakAdapter, amount);
@@ -801,13 +826,18 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
 
         if (amount == 0) return 0;
 
-        // Calculate minimum output using adapter's quote function
-        uint256 expectedOutput = IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
+        // FIX (Finding 2): Use oracle-based price floor for sandwich resistance
+        uint256 minOutput;
+        uint256 spotExpected = IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
             address(ibgtToken),
             address(apiaryToken),
             amount
         );
-        uint256 minOutput = _calculateMinOutput(expectedOutput);
+        uint256 spotMin = _calculateMinOutput(spotExpected);
+
+        uint256 oracleMin = _getOracleMinOutputApiary(amount);
+        // Take the higher of spot-based and oracle-based minimums
+        minOutput = oracleMin > spotMin ? oracleMin : spotMin;
 
         // Approve Kodiak adapter
         ibgtToken.forceApprove(kodiakAdapter, amount);
@@ -1205,6 +1235,58 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
+     * @notice FIX (Finding 2): Calculate oracle-based minimum HONEY output for iBGT swap
+     * @dev Uses iBGT/USD Chainlink feed. Since HONEY ≈ $1, iBGT price in USD ≈ HONEY output.
+     *      Returns 0 if oracle is not configured (graceful fallback to spot-only).
+     * @param ibgtAmount Amount of iBGT to swap (18 decimals)
+     * @return minHoney Minimum acceptable HONEY output (18 decimals) with slippage applied
+     */
+    function _getOracleMinOutputHoney(uint256 ibgtAmount) internal view returns (uint256 minHoney) {
+        if (address(ibgtPriceFeed) == address(0)) return 0;
+
+        (, int256 answer,, uint256 updatedAt,) = ibgtPriceFeed.latestRoundData();
+        if (answer <= 0) return 0; // Graceful fallback
+        if (block.timestamp - updatedAt > yieldPriceFeedStaleness) return 0; // Stale, fallback
+
+        // expectedHoney = ibgtAmount * ibgtPrice / 10^feedDecimals
+        // Both ibgtAmount and result are 18-decimal (HONEY)
+        uint256 expectedHoney = (ibgtAmount * uint256(answer)) / (10 ** ibgtPriceFeedDecimals);
+
+        // Apply slippage tolerance
+        minHoney = (expectedHoney * (BASIS_POINTS - slippageTolerance)) / BASIS_POINTS;
+    }
+
+    /**
+     * @notice FIX (Finding 2): Calculate oracle-based minimum APIARY output for iBGT swap
+     * @dev Uses iBGT/USD feed for iBGT value and TWAP oracle for APIARY price.
+     *      Returns 0 if oracles are not configured (graceful fallback).
+     * @param ibgtAmount Amount of iBGT to swap (18 decimals)
+     * @return minApiary Minimum acceptable APIARY output (9 decimals) with slippage applied
+     */
+    function _getOracleMinOutputApiary(uint256 ibgtAmount) internal returns (uint256 minApiary) {
+        if (address(ibgtPriceFeed) == address(0) || address(twapOracle) == address(0)) return 0;
+
+        (, int256 answer,, uint256 updatedAt,) = ibgtPriceFeed.latestRoundData();
+        if (answer <= 0) return 0;
+        if (block.timestamp - updatedAt > yieldPriceFeedStaleness) return 0;
+
+        // Get HONEY-equivalent value of iBGT (18-dec)
+        uint256 honeyValue = (ibgtAmount * uint256(answer)) / (10 ** ibgtPriceFeedDecimals);
+
+        // Get APIARY price in HONEY from TWAP (18-dec per 1e9 APIARY)
+        // Use try-catch as TWAP oracle may not be ready yet
+        try twapOracle.consult(1e9) returns (uint256 apiaryPriceInHoney) {
+            if (apiaryPriceInHoney == 0) return 0;
+            // expectedApiary = honeyValue(18-dec) * 1e9 / apiaryPrice(18-dec) = 9-dec APIARY
+            uint256 expectedApiary = (honeyValue * 1e9) / apiaryPriceInHoney;
+            // Apply slippage tolerance
+            minApiary = (expectedApiary * (BASIS_POINTS - slippageTolerance)) / BASIS_POINTS;
+        } catch {
+            return 0; // TWAP not ready, graceful fallback
+        }
+    }
+
+    /**
      * @notice Get market cap and treasury value (Phase 2 logic)
      * @return marketCap Current market cap
      * @return treasuryValue Current treasury value
@@ -1228,20 +1310,20 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Get pending yield from Infrared adapter (iBGT-denominated only)
-     * @dev H-02 Audit Fix: Only counts iBGT rewards to avoid mixing denominations.
-     *      Non-iBGT rewards are handled during claim (swapped or forwarded to treasury)
-     *      but excluded from the pending amount to prevent DoS in executeYield().
-     * @return pendingAmount Amount of iBGT claimable
+     * @notice Get pending yield from Infrared adapter
+     * @dev CODEX-MED-03 Fix: Includes all reward tokens (not just iBGT) so that
+     *      executeYield() remains callable when only non-iBGT rewards have accrued.
+     *      Non-iBGT rewards are swapped to iBGT during _claimYieldFromInfrared().
+     *      Returns the iBGT-equivalent total (non-iBGT amounts counted at face value
+     *      as a lower-bound proxy; exact conversion happens during claim).
+     * @return pendingAmount Estimated total yield in iBGT-equivalent terms
      */
     function pendingYield() public view returns (uint256 pendingAmount) {
         if (infraredAdapter == address(0)) return 0;
 
         (address[] memory tokens, uint256[] memory amounts) = IApiaryInfraredAdapter(infraredAdapter).pendingRewards();
         for (uint256 i = 0; i < tokens.length; i++) {
-            if (tokens[i] == address(ibgtToken)) {
-                pendingAmount += amounts[i];
-            }
+            pendingAmount += amounts[i];
         }
     }
 
@@ -1475,6 +1557,37 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
             revert APIARY__SLIPPAGE_TOO_HIGH();
         }
         emergencySlippageBps = _slippage;
+    }
+
+    /**
+     * @notice FIX (Finding 2): Set iBGT price feed for oracle-based slippage protection
+     * @param _priceFeed Chainlink-compatible iBGT/USD price feed
+     */
+    function setIbgtPriceFeed(address _priceFeed) external onlyOwner {
+        if (_priceFeed == address(0)) revert APIARY__ZERO_ADDRESS();
+        ibgtPriceFeed = IAggregatorV3(_priceFeed);
+        ibgtPriceFeedDecimals = ibgtPriceFeed.decimals();
+        if (yieldPriceFeedStaleness == 0) {
+            yieldPriceFeedStaleness = 3600; // Default 1 hour
+        }
+    }
+
+    /**
+     * @notice FIX (Finding 2): Set TWAP oracle for APIARY price-based slippage floor
+     * @param _twapOracle TWAP oracle address
+     */
+    function setTwapOracle(address _twapOracle) external onlyOwner {
+        if (_twapOracle == address(0)) revert APIARY__ZERO_ADDRESS();
+        twapOracle = IApiaryUniswapV2TwapOracle(_twapOracle);
+    }
+
+    /**
+     * @notice FIX (Finding 2): Set staleness threshold for yield price feed
+     * @param _staleness Maximum age in seconds
+     */
+    function setYieldPriceFeedStaleness(uint256 _staleness) external onlyOwner {
+        if (_staleness == 0) revert APIARY__ZERO_ADDRESS();
+        yieldPriceFeedStaleness = _staleness;
     }
 
     /**
