@@ -40,8 +40,8 @@ async function main() {
     const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
     const twap = new ethers.Contract(TWAP_ADDRESS, ABI, wallet);
 
-    const period = (await twap.PERIOD()).toNumber();
-    const minUpdates = (await twap.MIN_UPDATES_REQUIRED()).toNumber();
+    const period = Number(await twap.PERIOD());
+    const minUpdates = Number(await twap.MIN_UPDATES_REQUIRED());
 
     log('APIARY TWAP Oracle Updater started');
     log(`Oracle: ${TWAP_ADDRESS}`);
@@ -52,8 +52,8 @@ async function main() {
 
     async function tick() {
         try {
-            const updateCount = (await twap.updateCount()).toNumber();
-            const lastTimestamp = (await twap.blockTimestampLast()).toNumber();
+            const updateCount = Number(await twap.updateCount());
+            const lastTimestamp = Number(await twap.blockTimestampLast());
             const now = Math.floor(Date.now() / 1000);
             const elapsed = now - lastTimestamp;
             const remaining = Math.max(0, period - elapsed);
@@ -65,7 +65,7 @@ async function main() {
                 log('Calling update()...');
                 const tx = await twap.update({ gasLimit: 200000 });
                 const receipt = await tx.wait();
-                const newCount = (await twap.updateCount()).toNumber();
+                const newCount = Number(await twap.updateCount());
                 log(`Done! tx: ${receipt.transactionHash} | count: ${newCount}/${minUpdates}`);
             } else {
                 log(`Next update in ${Math.ceil(remaining / 60)}min`);
