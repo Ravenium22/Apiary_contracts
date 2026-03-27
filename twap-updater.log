@@ -1,0 +1,13 @@
+===========================================
+  TWAP Oracle Updater
+===========================================
+Oracle: 0x2bdf51D4500434dDdB7e6B350Ad23aa7A2063Fbb
+Caller: 0x6120133f8152C6d01c55Ae5b734FCFfC4dEC4BB6
+
+PERIOD: 3600s (1h)
+MIN_UPDATES_REQUIRED: 6
+Polling every 10 minutes
+
+[05:15:17] updateCount: 0/6 | last update: 137s ago | next eligible in: 3463s
+  -> Waiting 58 min until next update window
+

@@ -1,0 +1,12 @@
+{
+  "name": "apiary-twap-updater",
+  "version": "1.0.0",
+  "description": "Keeps the APIARY/HONEY TWAP oracle fresh by calling update() every hour",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ethers": "^5.7.2"
+  }
+}
