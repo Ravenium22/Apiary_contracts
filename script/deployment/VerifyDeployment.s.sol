@@ -180,6 +180,7 @@ contract VerifyDeployment is Script {
         _check("iBGT Bond vesting set", ibgtVesting > 0);
         _check("iBGT Bond discount set", ibgtDiscount > 0);
         _check("iBGT Bond max debt set", ibgtMaxDebt > 0);
+        _check("iBGT Bond referencePrice set", ibgtBond.referencePrice() > 0);
 
         // Bonding Calculator
         _check("Bond Calculator APIARY", bondingCalculator.APIARY() == address(apiary));
@@ -197,7 +198,8 @@ contract VerifyDeployment is Script {
         _check("LP Bond vesting set", lpVesting > 0);
         _check("LP Bond discount set", lpDiscount > 0);
         _check("LP Bond max debt set", lpMaxDebt > 0);
-        
+        _check("LP Bond referencePrice set", lpBond.referencePrice() > 0);
+
         // Pre-Sale
         _check("Pre-Sale HONEY", address(preSale.honey()) == address(honey));
         _check("Pre-Sale treasury", preSale.treasury() == address(treasury));

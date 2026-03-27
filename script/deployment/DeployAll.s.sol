@@ -82,6 +82,7 @@ contract DeployAll is Script {
     uint256 internal BOND_MAX_PAYOUT;
     uint256 internal BOND_DISCOUNT_RATE;
     uint256 internal BOND_MAX_DEBT;
+    uint256 internal BOND_REFERENCE_PRICE;
     // Allocation limits (APIARY token minting caps)
     uint256 internal ALLOC_TREASURY;
     uint256 internal ALLOC_PRESALE;
@@ -146,9 +147,17 @@ contract DeployAll is Script {
         
         vm.startBroadcast(deployerPrivateKey);
         
-        // ============ STEP 1: Deploy APIARY Token ============
-        console.log("STEP 1: Deploying APIARY Token...");
-        ApiaryToken apiary = new ApiaryToken(deployer);
+        // ============ STEP 1: Deploy or reuse APIARY Token ============
+        ApiaryToken apiary;
+        address existingApiary = _tryGetEnvAddress("APIARY_ADDRESS");
+        if (existingApiary != address(0) && existingApiary.code.length > 0) {
+            console.log("STEP 1: Reusing existing APIARY Token...");
+            apiary = ApiaryToken(existingApiary);
+            require(apiary.hasRole(apiary.DEFAULT_ADMIN_ROLE(), deployer), "DeployAll: deployer not admin on existing APIARY");
+        } else {
+            console.log("STEP 1: Deploying APIARY Token...");
+            apiary = new ApiaryToken(deployer);
+        }
         deployed.apiary = address(apiary);
         console.log("  APIARY Token:", deployed.apiary);
         
@@ -378,6 +387,16 @@ contract DeployAll is Script {
             console.log("  LP Bond terms initialized");
         }
 
+        // Set reference price on bond depositories (required — deposits revert if referencePrice == 0)
+        if (deployed.ibgtBond != address(0)) {
+            ApiaryBondDepository(deployed.ibgtBond).setReferencePrice(BOND_REFERENCE_PRICE);
+            console.log("  iBGT Bond reference price set:", BOND_REFERENCE_PRICE);
+        }
+        if (deployed.lpBond != address(0)) {
+            ApiaryBondDepository(deployed.lpBond).setReferencePrice(BOND_REFERENCE_PRICE);
+            console.log("  LP Bond reference price set:", BOND_REFERENCE_PRICE);
+        }
+
         // ============ STEP 14: Set APIARY Token on Pre-Sale (B-6) ============
         console.log("STEP 14: Setting APIARY token on Pre-Sale...");
         preSaleBond.setApiaryToken(deployed.apiary);
@@ -551,6 +570,9 @@ contract DeployAll is Script {
         require(BOND_DISCOUNT_RATE <= 5000, "DeployAll: BOND_DISCOUNT_RATE > 5000");
         BOND_MAX_DEBT = vm.envOr("BOND_MAX_DEBT", uint256(100_000e9));
         require(BOND_MAX_DEBT > 0, "DeployAll: BOND_MAX_DEBT must be > 0");
+        // Reference price for TWAP deviation check (HONEY, 18 decimals). Default 1e18 = 1 HONEY.
+        BOND_REFERENCE_PRICE = vm.envOr("BOND_REFERENCE_PRICE", uint256(1e18));
+        require(BOND_REFERENCE_PRICE > 0, "DeployAll: BOND_REFERENCE_PRICE must be > 0");
 
         // -- Allocation limits (APIARY minting caps per minter, 9 decimals) --
         ALLOC_TREASURY = vm.envOr("ALLOC_TREASURY", uint256(1_000_000_000e9));
@@ -597,5 +619,16 @@ contract DeployAll is Script {
     function _requireEnvAddress(string memory name) internal view returns (address addr) {
         addr = vm.envAddress(name);
         require(addr != address(0), string.concat("DeployAll: ", name, " is zero address"));
+    }
+
+    /**
+     * @notice Try to read an optional address env var, return address(0) if not set
+     */
+    function _tryGetEnvAddress(string memory name) internal view returns (address) {
+        try vm.envAddress(name) returns (address addr) {
+            return addr;
+        } catch {
+            return address(0);
+        }
     }
 }

@@ -102,8 +102,16 @@ contract DeployBonds is Script {
         
         console.log("4. Pre-Sale Bond deployed:", address(preSaleBond));
         
+        // Set reference price (required — deposits revert if referencePrice == 0)
+        uint256 referencePrice = vm.envOr("BOND_REFERENCE_PRICE", uint256(1e18));
+        require(referencePrice > 0, "DeployBonds: BOND_REFERENCE_PRICE must be > 0");
+        ibgtBond.setReferencePrice(referencePrice);
+        console.log("5. iBGT Bond reference price set:", referencePrice);
+        lpBond.setReferencePrice(referencePrice);
+        console.log("6. LP Bond reference price set:", referencePrice);
+
         vm.stopBroadcast();
-        
+
         console.log("\n=== Bond Contracts Deployed ===");
         console.log("TWAP Oracle:", address(twapOracle));
         console.log("iBGT Bond:", address(ibgtBond));

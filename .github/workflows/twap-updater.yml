@@ -1,0 +1,42 @@
+name: TWAP Oracle Updater
+
+on:
+  schedule:
+    # Run every 55 minutes (just under the 1-hour PERIOD)
+    - cron: '*/55 * * * *'
+  workflow_dispatch: # Manual trigger
+
+jobs:
+  update-twap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Call TWAP update()
+        env:
+          RPC_URL: https://rpc.berachain.com
+          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          TWAP_ADDRESS: '0x2bdf51D4500434dDdB7e6B350Ad23aa7A2063Fbb'
+        run: |
+          echo "Checking oracle state..."
+          UPDATE_COUNT=$(cast call $TWAP_ADDRESS "updateCount()(uint256)" --rpc-url $RPC_URL)
+          TIMESTAMP=$(cast call $TWAP_ADDRESS "blockTimestampLast()(uint32)" --rpc-url $RPC_URL)
+          NOW=$(date +%s)
+          ELAPSED=$((NOW - TIMESTAMP))
+
+          echo "updateCount: $UPDATE_COUNT | last update: ${ELAPSED}s ago"
+
+          if [ "$ELAPSED" -ge 3600 ]; then
+            echo "Calling update()..."
+            cast send $TWAP_ADDRESS "update()" \
+              --rpc-url $RPC_URL \
+              --private-key $PRIVATE_KEY \
+              --gas-limit 200000
+
+            NEW_COUNT=$(cast call $TWAP_ADDRESS "updateCount()(uint256)" --rpc-url $RPC_URL)
+            echo "Done! updateCount: $NEW_COUNT"
+          else
+            REMAINING=$((3600 - ELAPSED))
+            echo "Not yet eligible. ${REMAINING}s until next window."
+          fi
