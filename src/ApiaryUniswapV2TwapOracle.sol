@@ -23,6 +23,9 @@ contract ApiaryUniswapV2TwapOracle is IApiaryUniswapV2TwapOracle {
 
     FixedPoint.uq112x112 public price0Average;
 
+    /// @notice Whether the first bootstrap snapshot has been taken
+    bool public bootstrapped;
+
     /// @notice M-01 Fix: Number of full TWAP updates completed
     uint256 public updateCount;
     /// @notice M-01 Fix: Minimum real TWAP updates before oracle can be consulted
@@ -65,11 +68,11 @@ contract ApiaryUniswapV2TwapOracle is IApiaryUniswapV2TwapOracle {
         (uint256 price0Cumulative, , uint32 blockTimestamp) = UniswapV2OracleLibrary.currentCumulativePrices(address(APIARY_HONEY_PAIR));
 
         // AUDIT-FIX-01: Bootstrap only snapshots cumulative price — does NOT use spot reserves.
-        // Previously used FixedPoint.fraction(reserve1, reserve0) which was vulnerable to
-        // flash-loan manipulation of the initial price anchor.
-        if (price0Average._x == 0) {
+        // Uses a boolean flag so the oracle can exit bootstrap after one snapshot.
+        if (!bootstrapped) {
             price0CumulativeLast = price0Cumulative;
             blockTimestampLast = blockTimestamp;
+            bootstrapped = true;
             return;
         }
 
