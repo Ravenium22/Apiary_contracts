@@ -148,10 +148,11 @@ contract ApiaryPreSaleBondTest is Test {
 
     function setUp() public {
         // Create merkle tree for user1 and user2
-        // Leaf format: keccak256(bytes.concat(keccak256(abi.encode(address))))
-        bytes32 leaf1 = keccak256(bytes.concat(keccak256(abi.encode(user1))));
-        bytes32 leaf2 = keccak256(bytes.concat(keccak256(abi.encode(user2))));
-        bytes32 leaf3 = keccak256(bytes.concat(keccak256(abi.encode(user3))));
+        // Leaf format: keccak256(bytes.concat(keccak256(abi.encode(address, maxAllocation))))
+        uint256 maxAlloc = 500e9;
+        bytes32 leaf1 = keccak256(bytes.concat(keccak256(abi.encode(user1, maxAlloc))));
+        bytes32 leaf2 = keccak256(bytes.concat(keccak256(abi.encode(user2, maxAlloc))));
+        bytes32 leaf3 = keccak256(bytes.concat(keccak256(abi.encode(user3, maxAlloc))));
 
         // Simple merkle tree with 3 leaves
         // For simplicity, we'll use a 2-level tree: [leaf1, leaf2] -> root
@@ -185,6 +186,9 @@ contract ApiaryPreSaleBondTest is Test {
         // Set APIARY token
         vm.prank(admin);
         preSaleBond.setApiaryToken(address(apiary));
+
+        // Option A: Pre-fund the pre-sale contract with APIARY (instead of mintApiary)
+        apiary.mint(address(preSaleBond), 110_000e9);
 
         // Give users HONEY
         honey.mint(user1, 1_000_000e18);
@@ -280,19 +284,19 @@ contract ApiaryPreSaleBondTest is Test {
         vm.prank(admin);
         preSaleBond.startPreSaleBond();
 
-        assertTrue(preSaleBond.isWhitelisted(user1, user1Proof));
-        assertTrue(preSaleBond.isWhitelisted(user2, user2Proof));
+        assertTrue(preSaleBond.isWhitelisted(user1, user1Proof, 500e9));
+        assertTrue(preSaleBond.isWhitelisted(user2, user2Proof, 500e9));
     }
 
     function test_IsWhitelisted_InvalidProof() public view {
         bytes32[] memory emptyProof = new bytes32[](0);
 
-        assertFalse(preSaleBond.isWhitelisted(user1, emptyProof));
+        assertFalse(preSaleBond.isWhitelisted(user1, emptyProof, 500e9));
     }
 
     function test_IsWhitelisted_WrongAddress() public view {
         // User3's proof is for user3, but we check if attacker is whitelisted
-        assertFalse(preSaleBond.isWhitelisted(attacker, user1Proof));
+        assertFalse(preSaleBond.isWhitelisted(attacker, user1Proof, 500e9));
     }
 
     function test_IsWhitelisted_WhitelistDisabled() public {
@@ -302,7 +306,7 @@ contract ApiaryPreSaleBondTest is Test {
         bytes32[] memory emptyProof = new bytes32[](0);
 
         // When whitelist is disabled, anyone is "whitelisted"
-        assertTrue(preSaleBond.isWhitelisted(attacker, emptyProof));
+        assertTrue(preSaleBond.isWhitelisted(attacker, emptyProof, 500e9));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -320,7 +324,7 @@ contract ApiaryPreSaleBondTest is Test {
         emit ApiaryPurchased(user1, uint128(expectedApiary), uint128(honeyAmount));
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(honeyAmount, user1Proof, 0);
+        preSaleBond.purchaseApiary(honeyAmount, user1Proof, 0, 500e9);
 
         InvestorBondInfo memory info = preSaleBond.investorAllocations(user1);
         assertEq(info.totalAmount, expectedApiary);
@@ -334,7 +338,7 @@ contract ApiaryPreSaleBondTest is Test {
         uint256 treasuryBalanceBefore = honey.balanceOf(treasury);
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(honeyAmount, user1Proof, 0);
+        preSaleBond.purchaseApiary(honeyAmount, user1Proof, 0, 500e9);
 
         assertEq(honey.balanceOf(treasury), treasuryBalanceBefore + honeyAmount);
     }
@@ -347,7 +351,7 @@ contract ApiaryPreSaleBondTest is Test {
         uint256 expectedApiary = 500e9;
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(honeyAmount, user1Proof, 0);
+        preSaleBond.purchaseApiary(honeyAmount, user1Proof, 0, 500e9);
 
         assertEq(preSaleBond.totalBondsSold(), expectedApiary);
     }
@@ -359,7 +363,7 @@ contract ApiaryPreSaleBondTest is Test {
         uint256 honeyAmount = 250e18;
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(honeyAmount, user1Proof, 0);
+        preSaleBond.purchaseApiary(honeyAmount, user1Proof, 0, 500e9);
 
         assertEq(preSaleBond.totalHoneyRaised(), honeyAmount);
     }
@@ -372,7 +376,7 @@ contract ApiaryPreSaleBondTest is Test {
         uint256 user1HoneyBefore = honey.balanceOf(user1);
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(honeyAmount, user1Proof, 0);
+        preSaleBond.purchaseApiary(honeyAmount, user1Proof, 0, 500e9);
 
         // User should have been refunded excess
         // 500 APIARY * 0.50 = 250 HONEY used
@@ -390,7 +394,7 @@ contract ApiaryPreSaleBondTest is Test {
 
         // Attacker (not whitelisted) can now purchase
         vm.prank(attacker);
-        preSaleBond.purchaseApiary(50e18, emptyProof, 0); // 100 APIARY at $0.50
+        preSaleBond.purchaseApiary(50e18, emptyProof, 0, 500e9); // 100 APIARY at $0.50
 
         InvestorBondInfo memory info = preSaleBond.investorAllocations(attacker);
         assertEq(info.totalAmount, 100e9);
@@ -400,7 +404,7 @@ contract ApiaryPreSaleBondTest is Test {
         // Still in NotStarted state
         vm.prank(user1);
         vm.expectRevert(ApiaryPreSaleBond.APIARY__PRE_SALE_NOT_LIVE.selector);
-        preSaleBond.purchaseApiary(250e18, user1Proof, 0);
+        preSaleBond.purchaseApiary(250e18, user1Proof, 0, 500e9);
     }
 
     function testRevert_PurchaseApiary_InvalidProof() public {
@@ -411,7 +415,7 @@ contract ApiaryPreSaleBondTest is Test {
 
         vm.prank(attacker);
         vm.expectRevert(ApiaryPreSaleBond.APIARY__INVALID_PROOF.selector);
-        preSaleBond.purchaseApiary(250e18, emptyProof, 0);
+        preSaleBond.purchaseApiary(250e18, emptyProof, 0, 500e9);
     }
 
     function testRevert_PurchaseApiary_MaxBondReached() public {
@@ -420,12 +424,12 @@ contract ApiaryPreSaleBondTest is Test {
 
         // First purchase to max
         vm.prank(user1);
-        preSaleBond.purchaseApiary(250e18, user1Proof, 0);
+        preSaleBond.purchaseApiary(250e18, user1Proof, 0, 500e9);
 
         // Second purchase should fail
         vm.prank(user1);
         vm.expectRevert(ApiaryPreSaleBond.APIARY__MAX_BOND_REACHED.selector);
-        preSaleBond.purchaseApiary(25e18, user1Proof, 0);
+        preSaleBond.purchaseApiary(25e18, user1Proof, 0, 500e9);
     }
 
     function testRevert_PurchaseApiary_SlippageExceeded() public {
@@ -434,7 +438,7 @@ contract ApiaryPreSaleBondTest is Test {
 
         vm.prank(user1);
         vm.expectRevert(ApiaryPreSaleBond.APIARY__SLIPPAGE_EXCEEDED.selector);
-        preSaleBond.purchaseApiary(25e18, user1Proof, 1000e9); // Expect 1000 APIARY but only get 100
+        preSaleBond.purchaseApiary(25e18, user1Proof, 1000e9, 500e9); // Expect 1000 APIARY but only get 100
     }
 
     function testRevert_PurchaseApiary_WhenPaused() public {
@@ -446,7 +450,7 @@ contract ApiaryPreSaleBondTest is Test {
 
         vm.prank(user1);
         vm.expectRevert();
-        preSaleBond.purchaseApiary(250e18, user1Proof, 0);
+        preSaleBond.purchaseApiary(250e18, user1Proof, 0, 500e9);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -458,7 +462,7 @@ contract ApiaryPreSaleBondTest is Test {
         preSaleBond.startPreSaleBond();
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(250e18, user1Proof, 0);
+        preSaleBond.purchaseApiary(250e18, user1Proof, 0, 500e9);
 
         // Before TGE, vested amount should be 0
         assertEq(preSaleBond.vestedAmount(user1), 0);
@@ -470,12 +474,12 @@ contract ApiaryPreSaleBondTest is Test {
         preSaleBond.startPreSaleBond();
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(250e18, user1Proof, 0);
+        preSaleBond.purchaseApiary(250e18, user1Proof, 0, 500e9);
 
         // End pre-sale and start TGE
         vm.startPrank(admin);
         preSaleBond.endPreSaleBond();
-        preSaleBond.mintApiary();
+        // Option A: pre-sale is pre-funded via transfer (mintApiary removed)
         preSaleBond.setTgeStartTime();
         vm.stopPrank();
 
@@ -491,11 +495,11 @@ contract ApiaryPreSaleBondTest is Test {
         preSaleBond.startPreSaleBond();
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(250e18, user1Proof, 0);
+        preSaleBond.purchaseApiary(250e18, user1Proof, 0, 500e9);
 
         vm.startPrank(admin);
         preSaleBond.endPreSaleBond();
-        preSaleBond.mintApiary();
+        // Option A: pre-sale is pre-funded via transfer (mintApiary removed)
         preSaleBond.setTgeStartTime();
         vm.stopPrank();
 
@@ -511,11 +515,11 @@ contract ApiaryPreSaleBondTest is Test {
         preSaleBond.startPreSaleBond();
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(250e18, user1Proof, 0);
+        preSaleBond.purchaseApiary(250e18, user1Proof, 0, 500e9);
 
         vm.startPrank(admin);
         preSaleBond.endPreSaleBond();
-        preSaleBond.mintApiary();
+        // Option A: pre-sale is pre-funded via transfer (mintApiary removed)
         preSaleBond.setTgeStartTime();
         vm.stopPrank();
 
@@ -589,23 +593,10 @@ contract ApiaryPreSaleBondTest is Test {
                         ADMIN FUNCTION TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_MintApiary() public {
-        vm.prank(admin);
-        preSaleBond.startPreSaleBond();
-
-        vm.prank(user1);
-        preSaleBond.purchaseApiary(250e18, user1Proof, 0);
-
-        vm.prank(admin);
-        preSaleBond.endPreSaleBond();
-
-        vm.expectEmit(true, false, false, false);
-        emit TotalApiaryMinted(500e9);
-
-        vm.prank(admin);
-        preSaleBond.mintApiary();
-
-        assertEq(apiary.balanceOf(address(preSaleBond)), 500e9);
+    function test_OptionA_PreFunded() public {
+        // Pre-sale contract should already have APIARY from setUp
+        assertGt(apiary.balanceOf(address(preSaleBond)), 0);
+        assertEq(apiary.balanceOf(address(preSaleBond)), 110_000e9);
     }
 
     function test_SetTgeStartTime() public {
@@ -745,10 +736,20 @@ contract ApiaryPreSaleBondTest is Test {
         preSaleBond.endPreSaleBond();
     }
 
-    function testRevert_MintApiary_NotOwner() public {
-        vm.prank(attacker);
-        vm.expectRevert();
-        preSaleBond.mintApiary();
+    function test_OptionA_AvailableMatchesBalance() public {
+        // Available should reflect contract balance minus obligations
+        uint256 available = preSaleBond.apiaryTokensAvailable();
+        assertEq(available, 110_000e9);
+
+        // After a purchase, available decreases
+        vm.prank(admin);
+        preSaleBond.startPreSaleBond();
+        vm.prank(user1);
+        preSaleBond.purchaseApiary(250e18, user1Proof, 0, 500e9);
+
+        // Available = balance - (totalSold - totalClaimed)
+        uint256 availableAfter = preSaleBond.apiaryTokensAvailable();
+        assertEq(availableAfter, 110_000e9 - 500e9);
     }
 
     function testRevert_SetTokenPrice_NotOwner() public {
@@ -776,7 +777,7 @@ contract ApiaryPreSaleBondTest is Test {
         preSaleBond.startPreSaleBond();
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(250e18, user1Proof, 0);
+        preSaleBond.purchaseApiary(250e18, user1Proof, 0, 500e9);
 
         assertEq(preSaleBond.apiaryTokensAvailable(), PRE_SALE_TOTAL_APIARY - 500e9);
     }
@@ -786,7 +787,7 @@ contract ApiaryPreSaleBondTest is Test {
         preSaleBond.startPreSaleBond();
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(250e18, user1Proof, 0);
+        preSaleBond.purchaseApiary(250e18, user1Proof, 0, 500e9);
 
         InvestorBondInfo memory info = preSaleBond.investorAllocations(user1);
 
@@ -807,7 +808,7 @@ contract ApiaryPreSaleBondTest is Test {
         preSaleBond.startPreSaleBond();
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(honeyAmount, user1Proof, 0);
+        preSaleBond.purchaseApiary(honeyAmount, user1Proof, 0, 500e9);
 
         InvestorBondInfo memory info = preSaleBond.investorAllocations(user1);
         assertGt(info.totalAmount, 0);
@@ -819,11 +820,11 @@ contract ApiaryPreSaleBondTest is Test {
         preSaleBond.startPreSaleBond();
 
         vm.prank(user1);
-        preSaleBond.purchaseApiary(250e18, user1Proof, 0);
+        preSaleBond.purchaseApiary(250e18, user1Proof, 0, 500e9);
 
         vm.startPrank(admin);
         preSaleBond.endPreSaleBond();
-        preSaleBond.mintApiary();
+        // Option A: pre-sale is pre-funded via transfer (mintApiary removed)
         preSaleBond.setTgeStartTime();
         vm.stopPrank();
 

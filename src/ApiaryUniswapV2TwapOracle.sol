@@ -64,11 +64,10 @@ contract ApiaryUniswapV2TwapOracle is IApiaryUniswapV2TwapOracle {
     function update() public {
         (uint256 price0Cumulative, , uint32 blockTimestamp) = UniswapV2OracleLibrary.currentCumulativePrices(address(APIARY_HONEY_PAIR));
 
-        // If no TWAP exists yet, bootstrap using the spot price
+        // AUDIT-FIX-01: Bootstrap only snapshots cumulative price — does NOT use spot reserves.
+        // Previously used FixedPoint.fraction(reserve1, reserve0) which was vulnerable to
+        // flash-loan manipulation of the initial price anchor.
         if (price0Average._x == 0) {
-            (uint112 reserve0, uint112 reserve1, ) = APIARY_HONEY_PAIR.getReserves();
-
-            price0Average = FixedPoint.fraction(reserve1, reserve0);
             price0CumulativeLast = price0Cumulative;
             blockTimestampLast = blockTimestamp;
             return;

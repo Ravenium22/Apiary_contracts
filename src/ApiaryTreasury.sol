@@ -241,8 +241,10 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
                     uint256 valueInApiary = (_amount * uint256(answer) * 1e9) / (10 ** ibgtPriceFeed.decimals() * 1e18);
                     maxReasonableValue = (valueInApiary * maxMintRatioBps) / 10000;
                 } else {
-                    // Oracle unavailable/stale — fall back to decimal-normalized ratio
-                    maxReasonableValue = (_amount * maxMintRatioBps) / (10_000 * 1e9);
+                    // AUDIT-FIX-05: Revert on stale oracle instead of using a naive fallback.
+                    // The previous decimal-normalized fallback was ~30x too restrictive for iBGT,
+                    // effectively DoS-ing all iBGT bond deposits during oracle outages.
+                    revert APIARY__STALE_IBGT_PRICE();
                 }
             } else {
                 // Non-iBGT reserve tokens or no oracle: decimal-normalized ratio
@@ -295,6 +297,11 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
         totalReserves[_token] -= _amount;
         totalBorrowed[_token] += _amount;
 
+        // AUDIT-FIX-02: Sync iBGT accounting when borrowing iBGT reserves
+        if (_token == IBGT) {
+            _ibgtAccounting.availableBalance -= _amount;
+        }
+
         IERC20(_token).safeTransfer(msg.sender, _amount);
 
         emit Withdrawal(_token, _amount);
@@ -315,6 +322,11 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
 
         totalBorrowed[_token] -= _amount;
         totalReserves[_token] += _amount;
+
+        // AUDIT-FIX-02: Sync iBGT accounting when repaying iBGT reserves
+        if (_token == IBGT) {
+            _ibgtAccounting.availableBalance += _amount;
+        }
 
         IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
 
@@ -571,7 +583,7 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     /**
      * @notice Calculate market cap and treasury value for protocol mode determination
      * @dev Market cap = APIARY total supply × current TWAP price
-     *      Treasury value = iBGT balance (in HONEY terms) + LP token value
+     *      Treasury value = iBGT balance (in HONEY terms) + HONEY balance + LP token value
      * @return marketCap Market capitalization in HONEY (18 decimals)
      * @return treasuryValue Total treasury value in HONEY (18 decimals)
      */
@@ -619,7 +631,10 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
             lpValue = geometric * Math.sqrt(apiaryPrice);
         }
 
-        treasuryValue = ibgtValue + lpValue;
+        // 3. HONEY balance held directly in treasury
+        uint256 honeyBalance = IERC20(HONEY).balanceOf(address(this));
+
+        treasuryValue = ibgtValue + honeyBalance + lpValue;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -640,6 +655,14 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
     function syncIBGTAccounting(uint256 _acknowledgedSurplus) external onlyOwner {
         uint256 actualBalance = IERC20(IBGT).balanceOf(address(this));
         uint256 oldAvailable = _ibgtAccounting.availableBalance;
+
+        // AUDIT-FIX-10: If actual balance is lower than tracked, reduce totalReserves
+        // to prevent phantom reserves from inflating treasury valuation.
+        if (actualBalance < oldAvailable) {
+            uint256 deficit = oldAvailable - actualBalance;
+            totalReserves[IBGT] = totalReserves[IBGT] > deficit
+                ? totalReserves[IBGT] - deficit : 0;
+        }
 
         // AUDIT-MEDIUM-02 Fix: Only add to totalReserves the amount the owner explicitly
         // acknowledges, preventing an attacker from donating iBGT to inflate reserves

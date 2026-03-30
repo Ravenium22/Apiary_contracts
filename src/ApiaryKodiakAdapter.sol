@@ -1411,7 +1411,9 @@ contract ApiaryKodiakAdapter is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 currentAllowance = IERC20(token).allowance(address(this), spender);
 
         if (currentAllowance < amount) {
-            IERC20(token).forceApprove(spender, type(uint256).max);
+            // AUDIT-FIX-08: Use exact amount instead of type(uint256).max to limit blast radius
+            // if the router/farm is ever compromised. Consistent with ApiaryInfraredAdapter pattern.
+            IERC20(token).forceApprove(spender, amount);
         }
     }
 

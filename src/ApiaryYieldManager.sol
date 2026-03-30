@@ -12,6 +12,10 @@ import { IApiaryToken } from "./interfaces/IApiaryToken.sol";
 import { IAggregatorV3 } from "./interfaces/IAggregatorV3.sol";
 import { IApiaryUniswapV2TwapOracle } from "./interfaces/IApiaryUniswapV2TwapOracle.sol";
 
+interface IApiaryStaking {
+    function notifyRewardAmount(uint256 reward) external;
+}
+
 /**
  * @title ApiaryYieldManager
  * @author Apiary Protocol
@@ -970,9 +974,10 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         // Swap to APIARY first
         uint256 apiaryAmount = _swapToApiary(amount);
 
-        // Transfer to staking contract for distribution
+        // Transfer to staking contract and notify reward distribution
         if (apiaryAmount > 0) {
             apiaryToken.safeTransfer(stakingContract, apiaryAmount);
+            IApiaryStaking(stakingContract).notifyRewardAmount(apiaryAmount);
         }
     }
 

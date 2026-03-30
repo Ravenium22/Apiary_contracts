@@ -11,3 +11,24 @@ Polling every 10 minutes
 [05:15:17] updateCount: 0/6 | last update: 137s ago | next eligible in: 3463s
   -> Waiting 58 min until next update window
 
+[05:25:17] updateCount: 0/6 | last update: 737s ago | next eligible in: 2863s
+  -> Waiting 48 min until next update window
+
+[05:35:17] updateCount: 0/6 | last update: 1337s ago | next eligible in: 2263s
+  -> Waiting 38 min until next update window
+
+[05:45:17] updateCount: 0/6 | last update: 1937s ago | next eligible in: 1663s
+  -> Waiting 28 min until next update window
+
+[05:55:17] updateCount: 0/6 | last update: 2537s ago | next eligible in: 1063s
+  -> Waiting 18 min until next update window
+
+[06:05:17] updateCount: 0/6 | last update: 3137s ago | next eligible in: 463s
+  -> Waiting 8 min until next update window
+
+[06:15:17] updateCount: 1/6 | last update: 23s ago | next eligible in: 3577s
+  -> Waiting 60 min until next update window
+
+[06:25:17] updateCount: 1/6 | last update: 623s ago | next eligible in: 2977s
+  -> Waiting 50 min until next update window
+

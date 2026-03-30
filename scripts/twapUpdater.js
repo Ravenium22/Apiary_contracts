@@ -30,7 +30,7 @@ envFile.split('\n').forEach(line => {
     }
 });
 
-const TWAP_ADDRESS = '0x2bdf51D4500434dDdB7e6B350Ad23aa7A2063Fbb';
+const TWAP_ADDRESS = '0xDBA9624dfd8aC6198440FFfb2C98EE428ec0263c';
 const MIN_UPDATES = 6;
 const POLL_INTERVAL_MS = 10 * 60 * 1000; // check every 10 minutes
 const TWAP_ABI = [

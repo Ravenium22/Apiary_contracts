@@ -54,6 +54,9 @@ contract ApiaryToken is ERC20Permit, VaultOwned, AccessControl {
     /// @notice Remaining mint allocation for each minter address
     mapping(address user => uint256 amount) public allocationLimits;
 
+    /// @notice AUDIT-FIX-11: Tracks whether setAllocationLimit has been called for a minter
+    mapping(address user => bool) public allocationInitialized;
+
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -101,9 +104,13 @@ contract ApiaryToken is ERC20Permit, VaultOwned, AccessControl {
      *      Use increaseAllocationLimit() to add more tokens to an existing minter.
      */
     function setAllocationLimit(address minter, uint256 maxNumberOfTokens) public onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (allocationLimits[minter] != 0) {
+        // AUDIT-FIX-11: Use dedicated flag instead of value-based check.
+        // Previously, a minter who exhausted their allocation (value == 0) could have
+        // setAllocationLimit called again, bypassing the one-time guard.
+        if (allocationInitialized[minter]) {
             revert APIARY__ALLOCATION_LIMIT_ALREADY_SET();
         }
+        allocationInitialized[minter] = true;
         
         // Grant the minter role to the address if it doesn't have it
         if (!hasRole(MINTER_ROLE, minter)) {

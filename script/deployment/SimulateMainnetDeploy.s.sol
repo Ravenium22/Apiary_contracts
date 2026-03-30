@@ -3,7 +3,6 @@ pragma solidity 0.8.26;
 
 import {Test, console} from "forge-std/Test.sol";
 import {ApiaryToken} from "../../src/ApiaryToken.sol";
-import {sApiary} from "../../src/sApiary.sol";
 import {ApiaryTreasury} from "../../src/ApiaryTreasury.sol";
 import {ApiaryStaking} from "../../src/ApiaryStaking.sol";
 import {ApiaryBondDepository} from "../../src/ApiaryBondDepository.sol";
@@ -37,7 +36,6 @@ contract SimulateMainnetDeploy is Test {
         address infraredStaking = vm.envAddress("INFRARED_STAKING");
         address kodiakRouter = vm.envAddress("KODIAK_ROUTER");
         address kodiakFactory = vm.envAddress("KODIAK_FACTORY");
-        uint256 epochLength = vm.envUint("EPOCH_LENGTH");
         bytes32 merkleRoot = vm.envBytes32("MERKLE_ROOT");
         address multisig = vm.envAddress("MULTISIG_ADDRESS");
 
@@ -106,18 +104,11 @@ contract SimulateMainnetDeploy is Test {
         // =============================================
         console.log("\n--- PHASE 1: Deploy Remaining Contracts ---");
 
-        sApiary sApiaryToken = new sApiary(deployer);
-        console.log("5. sApiary deployed:", address(sApiaryToken));
-
         ApiaryTreasury treasury = new ApiaryTreasury(deployer, address(apiary), ibgt, honey, lpPair);
-        console.log("6. Treasury deployed:", address(treasury));
+        console.log("5. Treasury deployed:", address(treasury));
 
-        uint256 firstEpochBlock = block.number + epochLength;
-        ApiaryStaking staking = new ApiaryStaking(address(apiary), address(sApiaryToken), epochLength, 0, firstEpochBlock, deployer);
-        console.log("7. Staking deployed:", address(staking));
-
-        sApiaryToken.initialize(address(staking));
-        console.log("8. sApiary initialized");
+        ApiaryStaking staking = new ApiaryStaking(address(apiary), deployer);
+        console.log("6. Staking deployed:", address(staking));
 
         ApiaryUniswapV2TwapOracle twapOracle = new ApiaryUniswapV2TwapOracle(lpPair, address(apiary));
         console.log("9. TWAP Oracle deployed:", address(twapOracle));
@@ -192,8 +183,8 @@ contract SimulateMainnetDeploy is Test {
         preSale.setApiaryToken(address(apiary));
         console.log("22. Pre-Sale APIARY token set");
 
-        sApiaryToken.setIndex(1e9);
-        console.log("23. sApiary index set");
+        staking.setRewardsDistributor(address(yieldManager));
+        console.log("23. Staking rewards distributor set");
 
         yieldManager.setStakingContract(address(staking));
         yieldManager.setupApprovals();
@@ -207,7 +198,6 @@ contract SimulateMainnetDeploy is Test {
         apiary.grantRole(apiary.DEFAULT_ADMIN_ROLE(), multisig);
         treasury.transferOwnership(multisig);
         staking.transferOwnership(multisig);
-        sApiaryToken.transferOwnership(multisig);
         ibgtBond.transferOwnership(multisig);
         lpBond.transferOwnership(multisig);
         preSale.transferOwnership(multisig);
@@ -241,7 +231,6 @@ contract SimulateMainnetDeploy is Test {
         console.log("  SIMULATION COMPLETE - ALL PASSED");
         console.log("==============================================");
         console.log("APIARY:          ", address(apiary));
-        console.log("sAPIARY:         ", address(sApiaryToken));
         console.log("Treasury:        ", address(treasury));
         console.log("Staking:         ", address(staking));
         console.log("TWAP Oracle:     ", address(twapOracle));

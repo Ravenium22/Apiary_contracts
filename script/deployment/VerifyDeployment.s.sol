@@ -3,7 +3,6 @@ pragma solidity 0.8.26;
 
 import {Script, console} from "forge-std/Script.sol";
 import {ApiaryToken} from "../../src/ApiaryToken.sol";
-import {sApiary} from "../../src/sApiary.sol";
 import {ApiaryStaking} from "../../src/ApiaryStaking.sol";
 import {ApiaryTreasury} from "../../src/ApiaryTreasury.sol";
 import {ApiaryBondDepository} from "../../src/ApiaryBondDepository.sol";
@@ -35,7 +34,6 @@ contract VerifyDeployment is Script {
     
     // Contracts
     ApiaryToken apiary;
-    sApiary sApiaryToken;
     ApiaryStaking staking;
     ApiaryTreasury treasury;
     ApiaryBondDepository ibgtBond;
@@ -98,7 +96,6 @@ contract VerifyDeployment is Script {
         console.log("Loading deployed contracts...");
         
         apiary = ApiaryToken(vm.envAddress("APIARY_ADDRESS"));
-        sApiaryToken = sApiary(vm.envAddress("SAPIARY_ADDRESS"));
         staking = ApiaryStaking(payable(vm.envAddress("STAKING_ADDRESS")));
         treasury = ApiaryTreasury(vm.envAddress("TREASURY_ADDRESS"));
         ibgtBond = ApiaryBondDepository(vm.envAddress("IBGT_BOND_ADDRESS"));
@@ -124,22 +121,16 @@ contract VerifyDeployment is Script {
         // INITIAL_SUPPLY is internal, check totalMintedSupply instead
         _check("APIARY initial supply minted", apiary.totalMintedSupply() >= 200_000e9);
         _check("APIARY decimals", 9 == 9); // Always true, just logging
-        _check("sAPIARY staking contract", sApiaryToken.stakingContract() == address(staking));
-        _check("sAPIARY decimals", 9 == 9);
         
         console.log("");
     }
     
     function _verifyStaking() internal {
         console.log("--- Verifying Staking ---");
-        
+
         _check("Staking APIARY token", staking.APIARY() == address(apiary));
-        _check("Staking sAPIARY token", staking.sAPIARY() == address(sApiaryToken));
-        
-        (uint256 length, uint256 number, uint256 endBlock, uint256 distribute) = staking.epoch();
-        _check("Epoch length > 0", length > 0);
-        _check("Epoch distribute = 0 (Phase 1)", distribute == 0);
-        _check("sApiary index > 0", sApiaryToken.index() > 0);
+        _check("Staking rewardsDistributor set", staking.rewardsDistributor() != address(0));
+        _check("Staking rewardsDistributor is YM", staking.rewardsDistributor() == address(yieldManager));
 
         console.log("");
     }
@@ -302,10 +293,6 @@ contract VerifyDeployment is Script {
         uint256 apiarySize;
         assembly { apiarySize := extcodesize(sload(apiary.slot)) }
         _check("APIARY has code", apiarySize > 0);
-
-        uint256 sApiarySize;
-        assembly { sApiarySize := extcodesize(sload(sApiaryToken.slot)) }
-        _check("sAPIARY has code", sApiarySize > 0);
 
         // Post-deployment state: constructor mints INITIAL_SUPPLY (200_000e9) to deployer.
         // totalSupply and totalMintedSupply both reflect this initial mint.

@@ -7,55 +7,56 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
  * @title ApiaryStakingTest
- * @notice Comprehensive test suite for staking contract
- * @dev Tests instant staking, rebasing, Phase 1 behavior, and access control
- * 
+ * @notice Test suite for the SynthetixRewards-style ApiaryStaking contract
+ *
  * Test Categories:
  * 1. Deployment & Initialization
- * 2. Staking (Instant sAPIARY receipt)
- * 3. Unstaking
- * 4. Rebasing
- * 5. Phase 1 Behavior
- * 6. Locker Functions
- * 7. Admin Functions
- * 8. Access Control
- * 9. Edge Cases
+ * 2. Staking & Unstaking
+ * 3. Reward Distribution & Earning
+ * 4. Proportional Rewards (multi-user)
+ * 5. Compound
+ * 6. notifyRewardAmount (extend period)
+ * 7. Access Control
+ * 8. Retrieve (fund protection)
+ * 9. Exit
+ * 10. Edge Cases & Fuzz
  */
 
 /*//////////////////////////////////////////////////////////////
-                        MOCK CONTRACTS
+                        MOCK ERC20
 //////////////////////////////////////////////////////////////*/
 
-contract MockAPIARY is IERC20 {
+contract MockERC20 is IERC20 {
+    string public name;
+    string public symbol;
+    uint8 public decimals;
+    uint256 private _totalSupply;
     mapping(address => uint256) private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
-    uint256 private _totalSupply;
 
-    // Track last staked time updates
-    mapping(address => uint48) public lastTimeStaked;
+    constructor(string memory _name, string memory _symbol, uint8 _decimals) {
+        name = _name;
+        symbol = _symbol;
+        decimals = _decimals;
+    }
 
     function mint(address to, uint256 amount) external {
         _balances[to] += amount;
         _totalSupply += amount;
     }
 
-    function totalSupply() external view returns (uint256) {
-        return _totalSupply;
-    }
-
-    function balanceOf(address account) external view returns (uint256) {
-        return _balances[account];
-    }
+    function totalSupply() external view returns (uint256) { return _totalSupply; }
+    function balanceOf(address account) external view returns (uint256) { return _balances[account]; }
 
     function transfer(address to, uint256 amount) external returns (bool) {
-        require(_balances[msg.sender] >= amount, "Insufficient balance");
+        require(_balances[msg.sender] >= amount, "MockERC20: insufficient balance");
         _balances[msg.sender] -= amount;
         _balances[to] += amount;
         return true;
     }
 
-    function allowance(address owner, address spender) external view returns (uint256) {
-        return _allowances[owner][spender];
+    function allowance(address owner_, address spender) external view returns (uint256) {
+        return _allowances[owner_][spender];
     }
 
     function approve(address spender, uint256 amount) external returns (bool) {
@@ -64,178 +65,61 @@ contract MockAPIARY is IERC20 {
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        require(_balances[from] >= amount, "Insufficient balance");
-        require(_allowances[from][msg.sender] >= amount, "Insufficient allowance");
-
+        require(_balances[from] >= amount, "MockERC20: insufficient balance");
+        require(_allowances[from][msg.sender] >= amount, "MockERC20: insufficient allowance");
         _balances[from] -= amount;
         _balances[to] += amount;
         _allowances[from][msg.sender] -= amount;
-
-        return true;
-    }
-
-    function updateLastStakedTime(address _staker) external {
-        lastTimeStaked[_staker] = uint48(block.timestamp);
-    }
-}
-
-contract MocksAPIARY is IERC20 {
-    mapping(address => uint256) private _balances;
-    mapping(address => mapping(address => uint256)) private _allowances;
-    uint256 private _totalSupply;
-    uint256 public currentIndex = 1e9; // Initial index
-    uint256 public rebaseCount;
-    uint256 public lastRebaseProfit;
-    uint256 public lastRebaseEpoch;
-
-    function mint(address to, uint256 amount) external {
-        _balances[to] += amount;
-        _totalSupply += amount;
-    }
-
-    function setBalance(address account, uint256 amount) external {
-        _totalSupply = _totalSupply - _balances[account] + amount;
-        _balances[account] = amount;
-    }
-
-    function totalSupply() external view returns (uint256) {
-        return _totalSupply;
-    }
-
-    function balanceOf(address account) external view returns (uint256) {
-        return _balances[account];
-    }
-
-    function transfer(address to, uint256 amount) external returns (bool) {
-        require(_balances[msg.sender] >= amount, "Insufficient balance");
-        _balances[msg.sender] -= amount;
-        _balances[to] += amount;
-        return true;
-    }
-
-    function allowance(address owner, address spender) external view returns (uint256) {
-        return _allowances[owner][spender];
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        _allowances[msg.sender][spender] = amount;
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        require(_balances[from] >= amount, "Insufficient balance");
-        require(_allowances[from][msg.sender] >= amount, "Insufficient allowance");
-
-        _balances[from] -= amount;
-        _balances[to] += amount;
-        _allowances[from][msg.sender] -= amount;
-
-        return true;
-    }
-
-    // sAPIARY specific functions
-    function rebase(uint256 profit_, uint256 epoch_) external returns (uint256) {
-        rebaseCount++;
-        lastRebaseProfit = profit_;
-        lastRebaseEpoch = epoch_;
-
-        if (profit_ > 0) {
-            _totalSupply += profit_;
-        }
-
-        return _totalSupply;
-    }
-
-    function circulatingSupply() external view returns (uint256) {
-        return _totalSupply;
-    }
-
-    function index() external view returns (uint256) {
-        return currentIndex;
-    }
-
-    function setIndex(uint256 _index) external {
-        currentIndex = _index;
-    }
-
-    function gonsForBalance(uint256 amount) external pure returns (uint256) {
-        return amount;
-    }
-
-    function balanceForGons(uint256 gons) external pure returns (uint256) {
-        return gons;
-    }
-}
-
-contract MockDistributor {
-    uint256 public distributeCount;
-
-    function distribute() external returns (bool) {
-        distributeCount++;
         return true;
     }
 }
+
+/*//////////////////////////////////////////////////////////////
+                        TEST CONTRACT
+//////////////////////////////////////////////////////////////*/
 
 contract ApiaryStakingTest is Test {
     ApiaryStaking public staking;
-    MockAPIARY public apiary;
-    MocksAPIARY public sApiary;
-    MockDistributor public distributor;
+    MockERC20 public apiary;
 
-    // Test accounts
     address public owner = makeAddr("owner");
     address public user1 = makeAddr("user1");
     address public user2 = makeAddr("user2");
-    address public locker = makeAddr("locker");
+    address public distributor = makeAddr("distributor");
     address public attacker = makeAddr("attacker");
 
-    // Epoch config
-    uint256 public constant EPOCH_LENGTH = 2200; // ~3 hours in blocks
-    uint256 public constant FIRST_EPOCH_NUMBER = 1;
-    uint256 public firstEpochBlock;
+    uint256 constant REWARDS_DURATION = 7 days;
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event Staked(address indexed user, uint256 amount, address indexed recipient);
+    event Staked(address indexed user, uint256 amount);
     event Unstaked(address indexed user, uint256 amount);
-    event Rebased(uint256 indexed epoch, uint256 distribute);
-    event DistributorSet(address indexed distributor);
-    event LockerSet(address indexed locker);
+    event RewardClaimed(address indexed user, uint256 reward);
+    event Compounded(address indexed user, uint256 reward);
+    event RewardAdded(uint256 reward);
+    event RewardsDistributorUpdated(address indexed distributor);
 
     /*//////////////////////////////////////////////////////////////
                                 SETUP
     //////////////////////////////////////////////////////////////*/
 
     function setUp() public {
-        // Deploy mocks
-        apiary = new MockAPIARY();
-        sApiary = new MocksAPIARY();
-        distributor = new MockDistributor();
+        apiary = new MockERC20("Apiary", "APIARY", 9);
 
-        // Set first epoch block
-        firstEpochBlock = block.number + EPOCH_LENGTH;
-
-        // Deploy staking
         vm.prank(owner);
-        staking = new ApiaryStaking(
-            address(apiary),
-            address(sApiary),
-            EPOCH_LENGTH,
-            FIRST_EPOCH_NUMBER,
-            firstEpochBlock,
-            owner
-        );
+        staking = new ApiaryStaking(address(apiary), owner);
 
-        // Give staking contract sAPIARY to distribute
-        sApiary.mint(address(staking), 1_000_000e9);
+        // Set distributor
+        vm.prank(owner);
+        staking.setRewardsDistributor(distributor);
 
-        // Give users APIARY to stake
+        // Mint tokens to users
         apiary.mint(user1, 100_000e9);
         apiary.mint(user2, 100_000e9);
 
-        // Approve staking contract
+        // Approve staking
         vm.prank(user1);
         apiary.approve(address(staking), type(uint256).max);
         vm.prank(user2);
@@ -243,571 +127,572 @@ contract ApiaryStakingTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                        DEPLOYMENT TESTS
+                    HELPER: fund & notify rewards
+    //////////////////////////////////////////////////////////////*/
+
+    function _notifyReward(uint256 amount) internal {
+        apiary.mint(address(staking), amount);
+        vm.prank(distributor);
+        staking.notifyRewardAmount(amount);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    1. DEPLOYMENT & INITIALIZATION
     //////////////////////////////////////////////////////////////*/
 
     function test_Deployment_APIARYAddress() public view {
         assertEq(staking.APIARY(), address(apiary));
     }
 
-    function test_Deployment_sAPIARYAddress() public view {
-        assertEq(staking.sAPIARY(), address(sApiary));
-    }
-
-    function test_Deployment_EpochConfig() public view {
-        (uint256 length, uint256 number, uint256 endBlock, uint256 distribute) = staking.epoch();
-
-        assertEq(length, EPOCH_LENGTH);
-        assertEq(number, FIRST_EPOCH_NUMBER);
-        assertEq(endBlock, firstEpochBlock);
-        assertEq(distribute, 0); // Phase 1: no distribution
-    }
-
     function test_Deployment_Owner() public view {
         assertEq(staking.owner(), owner);
     }
 
-    function testRevert_Deployment_ZeroAPIARY() public {
-        vm.expectRevert(ApiaryStaking.APIARY__INVALID_ADDRESS.selector);
-        new ApiaryStaking(
-            address(0),
-            address(sApiary),
-            EPOCH_LENGTH,
-            FIRST_EPOCH_NUMBER,
-            firstEpochBlock,
-            owner
-        );
+    function test_Deployment_RewardsDistributor() public view {
+        assertEq(staking.rewardsDistributor(), distributor);
     }
 
-    function testRevert_Deployment_ZerosAPIARY() public {
+    function test_Deployment_InitialStateZero() public view {
+        assertEq(staking.totalStaked(), 0);
+        assertEq(staking.rewardRate(), 0);
+        assertEq(staking.periodFinish(), 0);
+        assertEq(staking.rewardPerTokenStored(), 0);
+    }
+
+    function testRevert_Deployment_ZeroAPIARY() public {
         vm.expectRevert(ApiaryStaking.APIARY__INVALID_ADDRESS.selector);
-        new ApiaryStaking(
-            address(apiary),
-            address(0),
-            EPOCH_LENGTH,
-            FIRST_EPOCH_NUMBER,
-            firstEpochBlock,
-            owner
-        );
+        new ApiaryStaking(address(0), owner);
     }
 
     /*//////////////////////////////////////////////////////////////
-                        STAKING TESTS
+                    2. BASIC STAKE & UNSTAKE
     //////////////////////////////////////////////////////////////*/
 
-    function test_Stake_InstantReceipt() public {
-        uint256 stakeAmount = 10_000e9;
+    function test_Stake_UpdatesBalanceAndTotal() public {
+        uint256 amount = 10_000e9;
 
         vm.prank(user1);
-        bool success = staking.stake(stakeAmount, user1);
+        staking.stake(amount);
 
-        assertTrue(success);
-        // User receives sAPIARY instantly (no warmup)
-        assertEq(sApiary.balanceOf(user1), stakeAmount);
+        assertEq(staking.balanceOf(user1), amount);
+        assertEq(staking.totalStaked(), amount);
     }
 
-    function test_Stake_UpdatesTotalStaked() public {
-        uint256 stakeAmount = 10_000e9;
+    function test_Stake_TransfersTokens() public {
+        uint256 amount = 10_000e9;
+        uint256 before1 = apiary.balanceOf(user1);
 
         vm.prank(user1);
-        staking.stake(stakeAmount, user1);
+        staking.stake(amount);
 
-        assertEq(staking.totalStaked(), stakeAmount);
-    }
-
-    function test_Stake_TransfersAPIARY() public {
-        uint256 stakeAmount = 10_000e9;
-        uint256 balanceBefore = apiary.balanceOf(user1);
-
-        vm.prank(user1);
-        staking.stake(stakeAmount, user1);
-
-        assertEq(apiary.balanceOf(user1), balanceBefore - stakeAmount);
-        assertEq(apiary.balanceOf(address(staking)), stakeAmount);
+        assertEq(apiary.balanceOf(user1), before1 - amount);
+        assertEq(apiary.balanceOf(address(staking)), amount);
     }
 
     function test_Stake_EmitsEvent() public {
-        uint256 stakeAmount = 10_000e9;
-
-        vm.expectEmit(true, false, true, true);
-        emit Staked(user1, stakeAmount, user1);
+        vm.expectEmit(true, false, false, true);
+        emit Staked(user1, 10_000e9);
 
         vm.prank(user1);
-        staking.stake(stakeAmount, user1);
+        staking.stake(10_000e9);
     }
 
-    function test_Stake_DifferentRecipient() public {
-        uint256 stakeAmount = 10_000e9;
-
+    function testRevert_Stake_ZeroAmount() public {
         vm.prank(user1);
-        staking.stake(stakeAmount, user2);
-
-        // sAPIARY goes to user2
-        assertEq(sApiary.balanceOf(user2), stakeAmount);
-        // APIARY taken from user1
-        assertEq(apiary.balanceOf(user1), 100_000e9 - stakeAmount);
+        vm.expectRevert(ApiaryStaking.APIARY__INVALID_AMOUNT.selector);
+        staking.stake(0);
     }
 
-    function test_Stake_UpdatesLastStakedTime() public {
-        uint256 stakeAmount = 10_000e9;
+    function test_Unstake_ReturnsTokens() public {
+        uint256 amount = 10_000e9;
 
         vm.prank(user1);
-        staking.stake(stakeAmount, user1);
+        staking.stake(amount);
 
-        assertEq(apiary.lastTimeStaked(user1), uint48(block.timestamp));
-    }
-
-    function test_Stake_MultipleStakes() public {
-        uint256 stake1 = 10_000e9;
-        uint256 stake2 = 20_000e9;
-
-        vm.startPrank(user1);
-        staking.stake(stake1, user1);
-        staking.stake(stake2, user1);
-        vm.stopPrank();
-
-        assertEq(sApiary.balanceOf(user1), stake1 + stake2);
-        assertEq(staking.totalStaked(), stake1 + stake2);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                        UNSTAKING TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_Unstake_ReturnsAPIARY() public {
-        uint256 stakeAmount = 10_000e9;
-
-        // First stake
-        vm.prank(user1);
-        staking.stake(stakeAmount, user1);
-
-        // Give user sAPIARY and approve
-        vm.prank(user1);
-        sApiary.approve(address(staking), stakeAmount);
-
-        uint256 apiaryBefore = apiary.balanceOf(user1);
+        uint256 beforeBal = apiary.balanceOf(user1);
 
         vm.prank(user1);
-        staking.unstake(stakeAmount, false);
+        staking.unstake(amount);
 
-        // User gets APIARY back 1:1
-        assertEq(apiary.balanceOf(user1), apiaryBefore + stakeAmount);
-    }
-
-    function test_Unstake_DecreasesTotalStaked() public {
-        uint256 stakeAmount = 10_000e9;
-
-        vm.prank(user1);
-        staking.stake(stakeAmount, user1);
-
-        vm.prank(user1);
-        sApiary.approve(address(staking), stakeAmount);
-
-        vm.prank(user1);
-        staking.unstake(stakeAmount, false);
-
+        assertEq(apiary.balanceOf(user1), beforeBal + amount);
+        assertEq(staking.balanceOf(user1), 0);
         assertEq(staking.totalStaked(), 0);
     }
 
     function test_Unstake_EmitsEvent() public {
-        uint256 stakeAmount = 10_000e9;
-
         vm.prank(user1);
-        staking.stake(stakeAmount, user1);
-
-        vm.prank(user1);
-        sApiary.approve(address(staking), stakeAmount);
+        staking.stake(10_000e9);
 
         vm.expectEmit(true, false, false, true);
-        emit Unstaked(user1, stakeAmount);
+        emit Unstaked(user1, 10_000e9);
 
         vm.prank(user1);
-        staking.unstake(stakeAmount, false);
+        staking.unstake(10_000e9);
     }
 
-    function test_Unstake_WithRebaseTrigger() public {
-        uint256 stakeAmount = 10_000e9;
-
+    function testRevert_Unstake_ZeroAmount() public {
         vm.prank(user1);
-        staking.stake(stakeAmount, user1);
-
-        vm.prank(user1);
-        sApiary.approve(address(staking), stakeAmount);
-
-        // Move past epoch end
-        vm.roll(firstEpochBlock + 1);
-
-        vm.prank(user1);
-        staking.unstake(stakeAmount, true); // trigger = true
-
-        // Check rebase was called
-        assertGt(sApiary.rebaseCount(), 0);
+        vm.expectRevert(ApiaryStaking.APIARY__INVALID_AMOUNT.selector);
+        staking.unstake(0);
     }
 
-    function test_Unstake_WithoutRebaseTrigger() public {
-        uint256 stakeAmount = 10_000e9;
+    function testRevert_Unstake_InsufficientBalance() public {
+        vm.prank(user1);
+        staking.stake(5_000e9);
 
         vm.prank(user1);
-        staking.stake(stakeAmount, user1);
-
-        vm.prank(user1);
-        sApiary.approve(address(staking), stakeAmount);
-
-        uint256 rebaseCountBefore = sApiary.rebaseCount();
-
-        vm.prank(user1);
-        staking.unstake(stakeAmount, false); // trigger = false
-
-        // Rebase should not be called if epoch hasn't ended
-        assertEq(sApiary.rebaseCount(), rebaseCountBefore);
+        vm.expectRevert(ApiaryStaking.APIARY__INSUFFICIENT_BALANCE.selector);
+        staking.unstake(5_001e9);
     }
 
     /*//////////////////////////////////////////////////////////////
-                        REBASING TESTS
+              3. STAKE -> NOTIFY -> WARP -> EARNED -> CLAIM
     //////////////////////////////////////////////////////////////*/
 
-    function test_Rebase_TriggersWhenEpochEnds() public {
-        // Move past epoch end
-        vm.roll(firstEpochBlock + 1);
+    function test_RewardFlow_SingleUser() public {
+        uint256 stakeAmount = 10_000e9;
+        uint256 rewardAmount = 7_000e9;
 
-        // HIGH-04 Fix: rebase() now restricted to owner/distributor
-        vm.prank(owner);
-        staking.rebase();
+        // Stake
+        vm.prank(user1);
+        staking.stake(stakeAmount);
 
-        assertGt(sApiary.rebaseCount(), 0);
+        // Notify rewards
+        _notifyReward(rewardAmount);
+
+        // Warp to end of period
+        vm.warp(block.timestamp + REWARDS_DURATION);
+
+        // Check earned (should be ~rewardAmount, minus dust from integer division)
+        uint256 pending = staking.earned(user1);
+        assertApproxEqAbs(pending, rewardAmount, 1e9); // within 1 token of rounding
+
+        // Claim
+        vm.prank(user1);
+        uint256 claimed = staking.claim();
+
+        assertApproxEqAbs(claimed, rewardAmount, 1e9);
+        assertEq(staking.earned(user1), 0);
     }
 
-    function test_Rebase_UpdatesEpochNumber() public {
-        vm.roll(firstEpochBlock + 1);
+    function test_RewardFlow_EarnedGrowsOverTime() public {
+        vm.prank(user1);
+        staking.stake(10_000e9);
 
-        vm.prank(owner);
-        staking.rebase();
+        _notifyReward(7_000e9);
 
-        (, uint256 number,,) = staking.epoch();
-        assertEq(number, FIRST_EPOCH_NUMBER + 1);
+        // At halfway
+        vm.warp(block.timestamp + REWARDS_DURATION / 2);
+        uint256 halfway = staking.earned(user1);
+
+        // At end
+        vm.warp(block.timestamp + REWARDS_DURATION / 2);
+        uint256 full = staking.earned(user1);
+
+        assertApproxEqAbs(full, halfway * 2, 2e9);
     }
 
-    function test_Rebase_UpdatesEndBlock() public {
-        vm.roll(firstEpochBlock + 1);
+    function test_Claim_EmitsEvent() public {
+        vm.prank(user1);
+        staking.stake(10_000e9);
 
-        vm.prank(owner);
-        staking.rebase();
+        _notifyReward(7_000e9);
+        vm.warp(block.timestamp + REWARDS_DURATION);
 
-        (,, uint256 endBlock,) = staking.epoch();
-        assertEq(endBlock, firstEpochBlock + EPOCH_LENGTH);
-    }
-
-    function test_Rebase_CallsDistributor() public {
-        vm.prank(owner);
-        staking.setContract(ApiaryStaking.CONTRACTS.DISTRIBUTOR, address(distributor));
-
-        vm.roll(firstEpochBlock + 1);
-
-        vm.prank(owner);
-        staking.rebase();
-
-        assertGt(distributor.distributeCount(), 0);
-    }
-
-    function test_Rebase_EmitsEvent() public {
-        vm.roll(firstEpochBlock + 1);
+        uint256 pending = staking.earned(user1);
 
         vm.expectEmit(true, false, false, true);
-        emit Rebased(FIRST_EPOCH_NUMBER + 1, 0); // distribute = 0 in Phase 1
-
-        vm.prank(owner);
-        staking.rebase();
-    }
-
-    function test_Rebase_NoOpBeforeEpochEnd() public {
-        // Don't move past epoch end
-
-        uint256 rebaseCountBefore = sApiary.rebaseCount();
-
-        vm.prank(owner);
-        staking.rebase();
-
-        assertEq(sApiary.rebaseCount(), rebaseCountBefore);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                    PHASE 1 BEHAVIOR TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_Phase1_DistributeAlwaysZero() public {
-        // In Phase 1, distribute should always be 0
-        // because contractBalance <= staked
-
-        uint256 stakeAmount = 10_000e9;
+        emit RewardClaimed(user1, pending);
 
         vm.prank(user1);
-        staking.stake(stakeAmount, user1);
-
-        vm.roll(firstEpochBlock + 1);
-
-        // HIGH-04 Fix: rebase() now restricted to owner/distributor
-        vm.prank(owner);
-        staking.rebase();
-
-        (,,, uint256 distribute) = staking.epoch();
-        assertEq(distribute, 0);
+        staking.claim();
     }
 
-    function test_Phase1_NoYieldDistribution() public {
+    function test_Claim_ZeroReward_NoTransfer() public {
+        vm.prank(user1);
+        staking.stake(10_000e9);
+
+        // No rewards notified
+        vm.prank(user1);
+        uint256 claimed = staking.claim();
+
+        assertEq(claimed, 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+          4. TWO USERS - PROPORTIONAL DISTRIBUTION
+    //////////////////////////////////////////////////////////////*/
+
+    function test_ProportionalRewards_EqualStakes() public {
+        // Both stake equal amounts
+        vm.prank(user1);
+        staking.stake(10_000e9);
+
+        vm.prank(user2);
+        staking.stake(10_000e9);
+
+        _notifyReward(14_000e9);
+        vm.warp(block.timestamp + REWARDS_DURATION);
+
+        uint256 earned1 = staking.earned(user1);
+        uint256 earned2 = staking.earned(user2);
+
+        // Each should get ~7_000e9
+        assertApproxEqAbs(earned1, 7_000e9, 1e9);
+        assertApproxEqAbs(earned2, 7_000e9, 1e9);
+    }
+
+    function test_ProportionalRewards_UnequalStakes() public {
+        // user1 stakes 3x more than user2
+        vm.prank(user1);
+        staking.stake(30_000e9);
+
+        vm.prank(user2);
+        staking.stake(10_000e9);
+
+        uint256 totalReward = 20_000e9;
+        _notifyReward(totalReward);
+        vm.warp(block.timestamp + REWARDS_DURATION);
+
+        uint256 earned1 = staking.earned(user1);
+        uint256 earned2 = staking.earned(user2);
+
+        // user1 should get 75%, user2 25%
+        assertApproxEqAbs(earned1, 15_000e9, 1e9);
+        assertApproxEqAbs(earned2, 5_000e9, 1e9);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    5. COMPOUND
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Compound_RestakesRewards() public {
         uint256 stakeAmount = 10_000e9;
+        uint256 rewardAmount = 7_000e9;
 
         vm.prank(user1);
-        staking.stake(stakeAmount, user1);
+        staking.stake(stakeAmount);
 
-        vm.roll(firstEpochBlock + 1);
+        _notifyReward(rewardAmount);
+        vm.warp(block.timestamp + REWARDS_DURATION);
 
-        // HIGH-04 Fix: rebase() now restricted to owner/distributor
-        vm.prank(owner);
-        staking.rebase();
+        uint256 pendingBefore = staking.earned(user1);
 
-        // Check that lastRebaseProfit was 0
-        assertEq(sApiary.lastRebaseProfit(), 0);
+        vm.prank(user1);
+        uint256 compounded = staking.compound();
+
+        assertApproxEqAbs(compounded, pendingBefore, 1);
+        // Balance should increase by compounded amount
+        assertApproxEqAbs(staking.balanceOf(user1), stakeAmount + compounded, 1);
+        // totalStaked should also increase
+        assertApproxEqAbs(staking.totalStaked(), stakeAmount + compounded, 1);
+        // Earned should be 0 after compound
+        assertEq(staking.earned(user1), 0);
+    }
+
+    function test_Compound_EmitsEvent() public {
+        vm.prank(user1);
+        staking.stake(10_000e9);
+
+        _notifyReward(7_000e9);
+        vm.warp(block.timestamp + REWARDS_DURATION);
+
+        uint256 pending = staking.earned(user1);
+
+        vm.expectEmit(true, false, false, true);
+        emit Compounded(user1, pending);
+
+        vm.prank(user1);
+        staking.compound();
     }
 
     /*//////////////////////////////////////////////////////////////
-                    LOCKER FUNCTION TESTS
+          6. NOTIFY REWARD AMOUNT TWICE (extend period)
     //////////////////////////////////////////////////////////////*/
 
-    function test_GiveLockBonus() public {
-        uint256 bonusAmount = 1000e9;
+    function test_NotifyReward_ExtendPeriod() public {
+        vm.prank(user1);
+        staking.stake(10_000e9);
 
-        vm.prank(owner);
-        staking.setContract(ApiaryStaking.CONTRACTS.LOCKER, locker);
+        // First notification
+        _notifyReward(7_000e9);
+        uint256 firstPeriodFinish = staking.periodFinish();
 
-        vm.prank(locker);
-        staking.giveLockBonus(bonusAmount);
+        // Warp halfway through
+        vm.warp(block.timestamp + REWARDS_DURATION / 2);
 
-        assertEq(staking.totalBonus(), bonusAmount);
-        assertEq(sApiary.balanceOf(locker), bonusAmount);
+        // Second notification adds leftover + new reward
+        _notifyReward(7_000e9);
+        uint256 secondPeriodFinish = staking.periodFinish();
+
+        // Period should be extended from current time
+        assertGt(secondPeriodFinish, firstPeriodFinish);
+
+        // Warp to new end
+        vm.warp(secondPeriodFinish);
+
+        uint256 earned = staking.earned(user1);
+        // Should be close to total 14_000e9 (minus integer rounding)
+        assertApproxEqAbs(earned, 14_000e9, 2e9);
     }
 
-    function test_ReturnLockBonus() public {
-        uint256 bonusAmount = 1000e9;
+    function test_NotifyReward_EmitsEvent() public {
+        apiary.mint(address(staking), 7_000e9);
 
-        vm.prank(owner);
-        staking.setContract(ApiaryStaking.CONTRACTS.LOCKER, locker);
+        vm.expectEmit(false, false, false, true);
+        emit RewardAdded(7_000e9);
 
-        // Give bonus first
-        vm.prank(locker);
-        staking.giveLockBonus(bonusAmount);
-
-        // Approve and return
-        vm.prank(locker);
-        sApiary.approve(address(staking), bonusAmount);
-
-        vm.prank(locker);
-        staking.returnLockBonus(bonusAmount);
-
-        assertEq(staking.totalBonus(), 0);
+        vm.prank(distributor);
+        staking.notifyRewardAmount(7_000e9);
     }
 
-    function testRevert_GiveLockBonus_OnlyLocker() public {
+    function test_NotifyReward_OwnerCanCall() public {
+        apiary.mint(address(staking), 7_000e9);
+
         vm.prank(owner);
-        staking.setContract(ApiaryStaking.CONTRACTS.LOCKER, locker);
+        staking.notifyRewardAmount(7_000e9);
 
-        vm.startPrank(attacker);
-
-        vm.expectRevert(ApiaryStaking.APIARY__ONLY_LOCKER.selector);
-        staking.giveLockBonus(1000e9);
-
-        vm.stopPrank();
+        assertGt(staking.rewardRate(), 0);
     }
 
-    function testRevert_ReturnLockBonus_OnlyLocker() public {
-        vm.prank(owner);
-        staking.setContract(ApiaryStaking.CONTRACTS.LOCKER, locker);
+    function test_NotifyReward_RewardTooHigh() public {
+        vm.prank(user1);
+        staking.stake(10_000e9);
 
-        vm.startPrank(attacker);
-
-        vm.expectRevert(ApiaryStaking.APIARY__ONLY_LOCKER.selector);
-        staking.returnLockBonus(1000e9);
-
-        vm.stopPrank();
+        // Notify more rewards than the contract has
+        vm.prank(distributor);
+        vm.expectRevert(ApiaryStaking.APIARY__REWARD_TOO_HIGH.selector);
+        staking.notifyRewardAmount(999_999e9);
     }
 
     /*//////////////////////////////////////////////////////////////
-                        ADMIN FUNCTION TESTS
+                    7. ACCESS CONTROL
     //////////////////////////////////////////////////////////////*/
 
-    function test_Pause() public {
+    function testRevert_NotifyReward_OnlyDistributorOrOwner() public {
+        apiary.mint(address(staking), 7_000e9);
+
+        vm.prank(attacker);
+        vm.expectRevert(ApiaryStaking.APIARY__NOT_REWARDS_DISTRIBUTOR.selector);
+        staking.notifyRewardAmount(7_000e9);
+    }
+
+    function testRevert_SetRewardsDistributor_OnlyOwner() public {
+        vm.prank(attacker);
+        vm.expectRevert();
+        staking.setRewardsDistributor(attacker);
+    }
+
+    function testRevert_SetRewardsDistributor_ZeroAddress() public {
         vm.prank(owner);
-        staking.pause();
-
-        assertTrue(staking.paused());
-    }
-
-    function test_Unpause() public {
-        vm.startPrank(owner);
-        staking.pause();
-        staking.unpause();
-        vm.stopPrank();
-
-        assertFalse(staking.paused());
-    }
-
-    function test_SetContract_Distributor() public {
-        vm.expectEmit(true, false, false, false);
-        emit DistributorSet(address(distributor));
-
-        vm.prank(owner);
-        staking.setContract(ApiaryStaking.CONTRACTS.DISTRIBUTOR, address(distributor));
-
-        assertEq(staking.distributor(), address(distributor));
-    }
-
-    function test_SetContract_Locker() public {
-        vm.expectEmit(true, false, false, false);
-        emit LockerSet(locker);
-
-        vm.prank(owner);
-        staking.setContract(ApiaryStaking.CONTRACTS.LOCKER, locker);
-
-        assertEq(staking.locker(), locker);
-    }
-
-    function testRevert_SetContract_LockerAlreadySet() public {
-        vm.startPrank(owner);
-        staking.setContract(ApiaryStaking.CONTRACTS.LOCKER, locker);
-
-        vm.expectRevert(ApiaryStaking.APIARY__LOCKER_ALREADY_SET.selector);
-        staking.setContract(ApiaryStaking.CONTRACTS.LOCKER, makeAddr("newLocker"));
-
-        vm.stopPrank();
-    }
-
-    function testRevert_SetContract_ZeroAddress() public {
-        vm.startPrank(owner);
-
         vm.expectRevert(ApiaryStaking.APIARY__INVALID_ADDRESS.selector);
-        staking.setContract(ApiaryStaking.CONTRACTS.DISTRIBUTOR, address(0));
-
-        vm.stopPrank();
+        staking.setRewardsDistributor(address(0));
     }
 
-    /*//////////////////////////////////////////////////////////////
-                    ACCESS CONTROL TESTS
-    //////////////////////////////////////////////////////////////*/
+    function test_SetRewardsDistributor_EmitsEvent() public {
+        address newDist = makeAddr("newDist");
+
+        vm.expectEmit(true, false, false, false);
+        emit RewardsDistributorUpdated(newDist);
+
+        vm.prank(owner);
+        staking.setRewardsDistributor(newDist);
+
+        assertEq(staking.rewardsDistributor(), newDist);
+    }
 
     function testRevert_Pause_OnlyOwner() public {
-        vm.startPrank(attacker);
-
+        vm.prank(attacker);
         vm.expectRevert();
         staking.pause();
-
-        vm.stopPrank();
     }
 
     function testRevert_Unpause_OnlyOwner() public {
         vm.prank(owner);
         staking.pause();
 
-        vm.startPrank(attacker);
-
+        vm.prank(attacker);
         vm.expectRevert();
         staking.unpause();
-
-        vm.stopPrank();
     }
 
-    function testRevert_SetContract_OnlyOwner() public {
-        vm.startPrank(attacker);
+    function test_Pause_BlocksStake() public {
+        vm.prank(owner);
+        staking.pause();
 
+        vm.prank(user1);
         vm.expectRevert();
-        staking.setContract(ApiaryStaking.CONTRACTS.DISTRIBUTOR, address(distributor));
+        staking.stake(10_000e9);
+    }
 
+    function test_Pause_BlocksUnstake() public {
+        vm.prank(user1);
+        staking.stake(10_000e9);
+
+        vm.prank(owner);
+        staking.pause();
+
+        vm.prank(user1);
+        vm.expectRevert();
+        staking.unstake(10_000e9);
+    }
+
+    function test_Unpause_AllowsStake() public {
+        vm.startPrank(owner);
+        staking.pause();
+        staking.unpause();
         vm.stopPrank();
+
+        vm.prank(user1);
+        staking.stake(10_000e9);
+        assertEq(staking.balanceOf(user1), 10_000e9);
     }
 
     /*//////////////////////////////////////////////////////////////
-                        EDGE CASE TESTS
+              8. RETRIEVE (fund protection)
     //////////////////////////////////////////////////////////////*/
 
-    function testRevert_Stake_WhenPaused() public {
+    function test_Retrieve_OtherToken() public {
+        MockERC20 other = new MockERC20("Other", "OTH", 18);
+        other.mint(address(staking), 500e18);
+
         vm.prank(owner);
-        staking.pause();
+        staking.retrieve(address(other), 500e18);
 
-        vm.startPrank(user1);
-
-        vm.expectRevert();
-        staking.stake(10_000e9, user1);
-
-        vm.stopPrank();
+        assertEq(other.balanceOf(owner), 500e18);
     }
 
-    function testRevert_Unstake_WhenPaused() public {
-        // Stake first
+    function test_Retrieve_ProtectsStakedFunds() public {
         vm.prank(user1);
-        staking.stake(10_000e9, user1);
+        staking.stake(10_000e9);
 
-        // Pause
+        // Try to drain staked APIARY
         vm.prank(owner);
-        staking.pause();
+        vm.expectRevert("ApiaryStaking: cannot drain staked or reward funds");
+        staking.retrieve(address(apiary), 10_000e9);
+    }
 
+    function test_Retrieve_ProtectsRewardFunds() public {
         vm.prank(user1);
-        sApiary.approve(address(staking), 10_000e9);
+        staking.stake(10_000e9);
 
-        vm.startPrank(user1);
+        _notifyReward(7_000e9);
 
+        // Try to drain reward APIARY
+        vm.prank(owner);
+        vm.expectRevert("ApiaryStaking: cannot drain staked or reward funds");
+        staking.retrieve(address(apiary), 7_000e9);
+    }
+
+    function test_Retrieve_AllowsExcessAPIARY() public {
+        vm.prank(user1);
+        staking.stake(10_000e9);
+
+        // Send extra APIARY accidentally
+        apiary.mint(address(staking), 5_000e9);
+
+        vm.prank(owner);
+        staking.retrieve(address(apiary), 5_000e9);
+
+        assertEq(apiary.balanceOf(owner), 5_000e9);
+    }
+
+    function testRevert_Retrieve_OnlyOwner() public {
+        vm.prank(attacker);
         vm.expectRevert();
-        staking.unstake(10_000e9, false);
-
-        vm.stopPrank();
+        staking.retrieve(address(apiary), 1);
     }
 
-    function test_Index_ReturnsCorrectValue() public view {
-        assertEq(staking.index(), sApiary.index());
-    }
+    /*//////////////////////////////////////////////////////////////
+                    9. EXIT (unstake all + claim)
+    //////////////////////////////////////////////////////////////*/
 
-    function test_ContractBalance_IncludesBonus() public {
+    function test_Exit_UnstakesAndClaims() public {
         uint256 stakeAmount = 10_000e9;
-        uint256 bonusAmount = 1000e9;
+        uint256 rewardAmount = 7_000e9;
 
         vm.prank(user1);
-        staking.stake(stakeAmount, user1);
+        staking.stake(stakeAmount);
 
-        vm.prank(owner);
-        staking.setContract(ApiaryStaking.CONTRACTS.LOCKER, locker);
+        _notifyReward(rewardAmount);
+        vm.warp(block.timestamp + REWARDS_DURATION);
 
-        vm.prank(locker);
-        staking.giveLockBonus(bonusAmount);
+        uint256 pending = staking.earned(user1);
+        uint256 balBefore = apiary.balanceOf(user1);
 
-        // contractBalance = APIARY balance + totalBonus
-        assertEq(staking.contractBalance(), stakeAmount + bonusAmount);
+        vm.prank(user1);
+        staking.exit();
+
+        assertEq(staking.balanceOf(user1), 0);
+        assertEq(staking.totalStaked(), 0);
+        // User receives stake + rewards
+        assertApproxEqAbs(apiary.balanceOf(user1), balBefore + stakeAmount + pending, 1);
     }
 
     /*//////////////////////////////////////////////////////////////
-                        FUZZ TESTS
+                    10. VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    function testFuzz_Stake(uint256 amount) public {
-        // Bound to user1's balance
-        amount = bound(amount, 1, 100_000e9);
-
-        vm.prank(user1);
-        staking.stake(amount, user1);
-
-        assertEq(sApiary.balanceOf(user1), amount);
-        assertEq(staking.totalStaked(), amount);
+    function test_RewardPerToken_ZeroTotalStaked() public view {
+        assertEq(staking.rewardPerToken(), 0);
     }
+
+    function test_GetRewardForDuration() public {
+        vm.prank(user1);
+        staking.stake(10_000e9);
+
+        _notifyReward(7_000e9);
+
+        uint256 rewardForDuration = staking.getRewardForDuration();
+        assertApproxEqAbs(rewardForDuration, 7_000e9, 1e9);
+    }
+
+    function test_LastTimeRewardApplicable_BeforePeriod() public view {
+        // No rewards notified, periodFinish is 0
+        assertEq(staking.lastTimeRewardApplicable(), 0);
+    }
+
+    function test_LastTimeRewardApplicable_DuringPeriod() public {
+        vm.prank(user1);
+        staking.stake(10_000e9);
+
+        _notifyReward(7_000e9);
+
+        uint256 ts = block.timestamp + 1 days;
+        vm.warp(ts);
+
+        assertEq(staking.lastTimeRewardApplicable(), ts);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    11. FUZZ TESTS
+    //////////////////////////////////////////////////////////////*/
 
     function testFuzz_StakeAndUnstake(uint256 stakeAmount, uint256 unstakeAmount) public {
         stakeAmount = bound(stakeAmount, 1, 100_000e9);
         unstakeAmount = bound(unstakeAmount, 1, stakeAmount);
 
         vm.prank(user1);
-        staking.stake(stakeAmount, user1);
+        staking.stake(stakeAmount);
 
         vm.prank(user1);
-        sApiary.approve(address(staking), unstakeAmount);
+        staking.unstake(unstakeAmount);
 
-        vm.prank(user1);
-        staking.unstake(unstakeAmount, false);
-
+        assertEq(staking.balanceOf(user1), stakeAmount - unstakeAmount);
         assertEq(staking.totalStaked(), stakeAmount - unstakeAmount);
+    }
+
+    function testFuzz_RewardDistribution(uint256 rewardAmount) public {
+        rewardAmount = bound(rewardAmount, REWARDS_DURATION, 1_000_000e9); // at least 1 wei/sec
+
+        vm.prank(user1);
+        staking.stake(50_000e9);
+
+        _notifyReward(rewardAmount);
+        vm.warp(block.timestamp + REWARDS_DURATION);
+
+        uint256 earned = staking.earned(user1);
+        // Allow rounding error up to REWARDS_DURATION (1 wei per second lost)
+        assertApproxEqAbs(earned, rewardAmount, REWARDS_DURATION);
     }
 }

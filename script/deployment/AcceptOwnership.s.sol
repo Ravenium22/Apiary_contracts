@@ -3,7 +3,6 @@ pragma solidity 0.8.26;
 
 import {Script, console} from "forge-std/Script.sol";
 import {ApiaryToken} from "../../src/ApiaryToken.sol";
-import {sApiary} from "../../src/sApiary.sol";
 import {ApiaryTreasury} from "../../src/ApiaryTreasury.sol";
 import {ApiaryStaking} from "../../src/ApiaryStaking.sol";
 import {ApiaryBondDepository} from "../../src/ApiaryBondDepository.sol";
@@ -40,7 +39,6 @@ contract AcceptOwnershipMultisig is Script {
         // Load deployed contract addresses from env
         address treasury = vm.envAddress("TREASURY_ADDRESS");
         address staking = vm.envAddress("STAKING_ADDRESS");
-        address sApiaryAddr = vm.envAddress("SAPIARY_ADDRESS");
         address preSale = vm.envAddress("PRESALE_ADDRESS");
         address yieldManager = vm.envAddress("YIELD_MANAGER_ADDRESS");
         address infraredAdapter = vm.envAddress("INFRARED_ADAPTER_ADDRESS");
@@ -61,9 +59,6 @@ contract AcceptOwnershipMultisig is Script {
 
         ApiaryStaking(payable(staking)).acceptOwnership();
         console.log("  Staking: ownership accepted");
-
-        sApiary(sApiaryAddr).acceptOwnership();
-        console.log("  sApiary: ownership accepted");
 
         ApiaryPreSaleBond(preSale).acceptOwnership();
         console.log("  Pre-Sale Bond: ownership accepted");

@@ -3,7 +3,6 @@ pragma solidity 0.8.26;
 
 import {Script, console} from "forge-std/Script.sol";
 import {ApiaryToken} from "../../src/ApiaryToken.sol";
-import {sApiary} from "../../src/sApiary.sol";
 import {ApiaryTreasury} from "../../src/ApiaryTreasury.sol";
 import {ApiaryStaking} from "../../src/ApiaryStaking.sol";
 import {ApiaryBondDepository} from "../../src/ApiaryBondDepository.sol";
@@ -52,7 +51,6 @@ import {ApiaryBondingCalculator} from "../../src/ApiaryBondingCalculator.sol";
  *   - INFRARED_STAKING: Infrared staking contract address
  *   - KODIAK_ROUTER: Kodiak DEX router address
  *   - KODIAK_FACTORY: Kodiak DEX factory address
- *   - EPOCH_LENGTH: Epoch length in blocks
  *   - MERKLE_ROOT: Pre-sale whitelist merkle root (optional, defaults to placeholder)
  *
  * Optional Environment Variables:
@@ -72,9 +70,6 @@ contract DeployAll is Script {
     address internal INFRARED_STAKING;
     address internal KODIAK_ROUTER;
     address internal KODIAK_FACTORY;
-    // Staking
-    uint256 internal EPOCH_LENGTH;
-    uint256 internal FIRST_EPOCH_NUMBER;
     // Pre-sale
     bytes32 internal MERKLE_ROOT;
     // Bond terms
@@ -91,15 +86,12 @@ contract DeployAll is Script {
     // Treasury
     uint256 internal MAX_MINT_RATIO_BPS;
     uint256 internal MAX_MINT_PER_DEPOSIT;
-    // sApiary
-    uint256 internal SAPIARY_INITIAL_INDEX;
     // Ownership
     address internal MULTISIG;
     
     // ============ DEPLOYED ADDRESSES ============
     struct DeployedAddresses {
         address apiary;
-        address sApiary;
         address treasury;
         address staking;
         address ibgtBond;
@@ -137,7 +129,6 @@ contract DeployAll is Script {
         console.log("  Infrared:    ", INFRARED_STAKING);
         console.log("  Kodiak Rtr:  ", KODIAK_ROUTER);
         console.log("  Kodiak Fct:  ", KODIAK_FACTORY);
-        console.log("  Epoch Length:", EPOCH_LENGTH);
         if (!hasRealLP) {
             console.log("");
             console.log("WARNING: No LP pair found. TWAP Oracle and Bond contracts");
@@ -161,14 +152,8 @@ contract DeployAll is Script {
         deployed.apiary = address(apiary);
         console.log("  APIARY Token:", deployed.apiary);
         
-        // ============ STEP 2: Deploy sAPIARY Token ============
-        console.log("STEP 2: Deploying sAPIARY Token...");
-        sApiary sApiaryToken = new sApiary(deployer);
-        deployed.sApiary = address(sApiaryToken);
-        console.log("  sAPIARY Token:", deployed.sApiary);
-        
-        // ============ STEP 3: Set LP address ============
-        console.log("STEP 3: Setting LP address...");
+        // ============ STEP 2: Set LP address ============
+        console.log("STEP 2: Setting LP address...");
         if (hasRealLP) {
             deployed.apiaryHoneyLP = lpPairAddress;
             console.log("  Using existing LP pair:", deployed.apiaryHoneyLP);
@@ -178,8 +163,8 @@ contract DeployAll is Script {
             console.log("  Using placeholder LP (update later):", deployed.apiaryHoneyLP);
         }
         
-        // ============ STEP 4: Deploy Treasury ============
-        console.log("STEP 4: Deploying Treasury...");
+        // ============ STEP 3: Deploy Treasury ============
+        console.log("STEP 3: Deploying Treasury...");
         ApiaryTreasury treasury = new ApiaryTreasury(
             deployer,
             deployed.apiary,
@@ -190,28 +175,18 @@ contract DeployAll is Script {
         deployed.treasury = address(treasury);
         console.log("  Treasury:", deployed.treasury);
         
-        // ============ STEP 5: Deploy Staking ============
-        console.log("STEP 5: Deploying Staking...");
-        uint256 firstEpochBlock = block.number + EPOCH_LENGTH;
+        // ============ STEP 4: Deploy Staking ============
+        console.log("STEP 4: Deploying Staking...");
         ApiaryStaking staking = new ApiaryStaking(
             deployed.apiary,
-            deployed.sApiary,
-            EPOCH_LENGTH,
-            FIRST_EPOCH_NUMBER,
-            firstEpochBlock,
             deployer
         );
         deployed.staking = address(staking);
         console.log("  Staking:", deployed.staking);
-        
-        // ============ STEP 6: Initialize sAPIARY with Staking ============
-        console.log("STEP 6: Initializing sAPIARY with Staking contract...");
-        sApiaryToken.initialize(deployed.staking);
-        console.log("  sAPIARY initialized with staking");
-        
-        // ============ STEP 7: Deploy TWAP Oracle (only if LP exists) ============
+
+        // ============ STEP 5: Deploy TWAP Oracle (only if LP exists) ============
         if (hasRealLP) {
-            console.log("STEP 7: Deploying TWAP Oracle...");
+            console.log("STEP 5: Deploying TWAP Oracle...");
             ApiaryUniswapV2TwapOracle twapOracle = new ApiaryUniswapV2TwapOracle(
                 deployed.apiaryHoneyLP,
                 deployed.apiary
@@ -219,18 +194,18 @@ contract DeployAll is Script {
             deployed.twapOracle = address(twapOracle);
             console.log("  TWAP Oracle:", deployed.twapOracle);
         } else {
-            console.log("STEP 7: Skipping TWAP Oracle (no LP pair)...");
+            console.log("STEP 5: Skipping TWAP Oracle (no LP pair)...");
             deployed.twapOracle = address(0);
         }
         
-        // ============ STEP 8: Deploy Bonding Calculator ============
-        console.log("STEP 8: Deploying Bonding Calculator...");
+        // ============ STEP 6: Deploy Bonding Calculator ============
+        console.log("STEP 6: Deploying Bonding Calculator...");
         ApiaryBondingCalculator bondingCalc = new ApiaryBondingCalculator(deployed.apiary);
         deployed.bondingCalculator = address(bondingCalc);
         console.log("  Bonding Calculator:", deployed.bondingCalculator);
 
-        // ============ STEP 9: Deploy Bond Contracts ============
-        console.log("STEP 9: Deploying Bond Contracts...");
+        // ============ STEP 7: Deploy Bond Contracts ============
+        console.log("STEP 7: Deploying Bond Contracts...");
 
         if (hasRealLP) {
             // iBGT Bond (uses iBGT/USD price feed for correct valuation)
@@ -274,8 +249,8 @@ contract DeployAll is Script {
         deployed.preSaleBond = address(preSaleBond);
         console.log("  Pre-Sale Bond:", deployed.preSaleBond);
         
-        // ============ STEP 10: Deploy Yield Manager & Adapters ============
-        console.log("STEP 10: Deploying Yield Manager & Adapters...");
+        // ============ STEP 8: Deploy Yield Manager & Adapters ============
+        console.log("STEP 8: Deploying Yield Manager & Adapters...");
         
         // Deploy Yield Manager with placeholder adapters
         ApiaryYieldManager yieldManager = new ApiaryYieldManager(
@@ -318,8 +293,8 @@ contract DeployAll is Script {
         yieldManager.setKodiakAdapter(deployed.kodiakAdapter);
         console.log("  Yield Manager adapters updated");
 
-        // ============ STEP 11: APIARY Minting Allocations (B-7) ============
-        console.log("STEP 11: Setting APIARY minting allocations...");
+        // ============ STEP 9: APIARY Minting Allocations (B-7) ============
+        console.log("STEP 9: Setting APIARY minting allocations...");
         apiary.setAllocationLimit(deployed.treasury, ALLOC_TREASURY);
         console.log("  Treasury allocation set");
         apiary.setAllocationLimit(deployed.preSaleBond, ALLOC_PRESALE);
@@ -333,8 +308,8 @@ contract DeployAll is Script {
             console.log("  LP Bond allocation set");
         }
 
-        // ============ STEP 12: Treasury Configuration (H-1) ============
-        console.log("STEP 12: Configuring treasury...");
+        // ============ STEP 10: Treasury Configuration (H-1) ============
+        console.log("STEP 10: Configuring treasury...");
         treasury.setReserveToken(IBGT_ADDRESS, true);
         console.log("  iBGT set as reserve token");
         if (hasRealLP) {
@@ -366,8 +341,8 @@ contract DeployAll is Script {
         treasury.setIbgtPriceFeed(IBGT_PRICE_FEED);
         console.log("  iBGT price feed set:", IBGT_PRICE_FEED);
 
-        // ============ STEP 13: Initialize Bond Terms (B-5) ============
-        console.log("STEP 13: Initializing bond terms...");
+        // ============ STEP 11: Initialize Bond Terms (B-5) ============
+        console.log("STEP 11: Initializing bond terms...");
         if (deployed.ibgtBond != address(0)) {
             ApiaryBondDepository(deployed.ibgtBond).initializeBondTerms(
                 BOND_VESTING_TERM,
@@ -397,27 +372,23 @@ contract DeployAll is Script {
             console.log("  LP Bond reference price set:", BOND_REFERENCE_PRICE);
         }
 
-        // ============ STEP 14: Set APIARY Token on Pre-Sale (B-6) ============
-        console.log("STEP 14: Setting APIARY token on Pre-Sale...");
+        // ============ STEP 12: Set APIARY Token on Pre-Sale (B-6) ============
+        console.log("STEP 12: Setting APIARY token on Pre-Sale...");
         preSaleBond.setApiaryToken(deployed.apiary);
         console.log("  Pre-Sale APIARY token set");
 
-        // ============ STEP 15: sApiary Index + Staking Config (M-1) ============
-        console.log("STEP 15: Configuring sApiary and Staking...");
-        sApiaryToken.setIndex(SAPIARY_INITIAL_INDEX);
-        console.log("  sApiary index set");
-        // Note: staking.setContract(DISTRIBUTOR, addr) deferred until a distributor is deployed
-
-        // ============ STEP 16: Yield Manager Config (H-3 + M-1) ============
-        console.log("STEP 16: Configuring Yield Manager...");
+        // ============ STEP 13: Staking + Yield Manager Config (M-1) ============
+        console.log("STEP 13: Configuring Staking and Yield Manager...");
+        staking.setRewardsDistributor(deployed.yieldManager);
+        console.log("  Staking rewards distributor set to Yield Manager");
         yieldManager.setStakingContract(deployed.staking);
         console.log("  YM staking contract set");
         yieldManager.setupApprovals();
         console.log("  YM token approvals configured");
 
-        // ============ STEP 17: Ownership Transfer to Multisig (H-2) ============
+        // ============ STEP 14: Ownership Transfer to Multisig (H-2) ============
         if (MULTISIG != address(0)) {
-            console.log("STEP 17: Transferring ownership to multisig...");
+            console.log("STEP 14: Transferring ownership to multisig...");
             console.log("  Multisig:", MULTISIG);
 
             // ApiaryToken uses AccessControl — grant admin role to multisig
@@ -429,8 +400,6 @@ contract DeployAll is Script {
             console.log("  Treasury: transfer initiated");
             staking.transferOwnership(MULTISIG);
             console.log("  Staking: transfer initiated");
-            sApiaryToken.transferOwnership(MULTISIG);
-            console.log("  sApiary: transfer initiated");
 
             if (deployed.ibgtBond != address(0)) {
                 ApiaryBondDepository(deployed.ibgtBond).transferOwnership(MULTISIG);
@@ -451,7 +420,7 @@ contract DeployAll is Script {
 
             console.log("  NOTE: Multisig must call acceptOwnership() on each contract");
         } else {
-            console.log("STEP 17: Skipping ownership transfer (no MULTISIG_ADDRESS set)");
+            console.log("STEP 14: Skipping ownership transfer (no MULTISIG_ADDRESS set)");
         }
 
         vm.stopBroadcast();
@@ -464,7 +433,6 @@ contract DeployAll is Script {
         console.log("");
         console.log("Core Tokens:");
         console.log("  APIARY:       ", deployed.apiary);
-        console.log("  sAPIARY:      ", deployed.sApiary);
         console.log("");
         console.log("Core Contracts:");
         console.log("  Treasury:     ", deployed.treasury);
@@ -495,7 +463,6 @@ contract DeployAll is Script {
         console.log("  Bond Discount:    ", BOND_DISCOUNT_RATE, "bps");
         console.log("  Bond Max Debt:    ", BOND_MAX_DEBT);
         console.log("  Max Mint Ratio:   ", MAX_MINT_RATIO_BPS, "bps");
-        console.log("  sApiary Index:    ", SAPIARY_INITIAL_INDEX);
         if (MULTISIG != address(0)) {
             console.log("  Multisig:         ", MULTISIG);
         }
@@ -546,11 +513,6 @@ contract DeployAll is Script {
         KODIAK_ROUTER = _requireEnvAddress("KODIAK_ROUTER");
         KODIAK_FACTORY = _requireEnvAddress("KODIAK_FACTORY");
 
-        // -- Staking --
-        EPOCH_LENGTH = vm.envUint("EPOCH_LENGTH");
-        require(EPOCH_LENGTH > 0, "DeployAll: EPOCH_LENGTH must be > 0");
-        FIRST_EPOCH_NUMBER = vm.envOr("FIRST_EPOCH_NUMBER", uint256(0));
-
         // -- Pre-sale merkle root --
         try vm.envBytes32("MERKLE_ROOT") returns (bytes32 root) {
             require(root != bytes32(0), "DeployAll: MERKLE_ROOT must be non-zero");
@@ -561,9 +523,9 @@ contract DeployAll is Script {
         }
 
         // -- Bond terms (required when LP exists, checked at use-site) --
-        // MINIMUM_VESTING_TERM = 17280, max payout 1000 (1%), max discount 5000 (50%)
-        BOND_VESTING_TERM = vm.envOr("BOND_VESTING_TERM", uint256(17_280));
-        require(BOND_VESTING_TERM >= 17_280, "DeployAll: BOND_VESTING_TERM < 17280");
+        // MINIMUM_VESTING_TERM = 28800 (1 day at ~3s blocks), max payout 1000 (1%), max discount 5000 (50%)
+        BOND_VESTING_TERM = vm.envOr("BOND_VESTING_TERM", uint256(28_800));
+        require(BOND_VESTING_TERM >= 28_800, "DeployAll: BOND_VESTING_TERM < 28800");
         BOND_MAX_PAYOUT = vm.envOr("BOND_MAX_PAYOUT", uint256(1));
         require(BOND_MAX_PAYOUT > 0 && BOND_MAX_PAYOUT <= 1000, "DeployAll: BOND_MAX_PAYOUT out of range 1-1000");
         BOND_DISCOUNT_RATE = vm.envOr("BOND_DISCOUNT_RATE", uint256(500));
@@ -584,10 +546,6 @@ contract DeployAll is Script {
         MAX_MINT_RATIO_BPS = vm.envOr("MAX_MINT_RATIO_BPS", uint256(12_000));
         require(MAX_MINT_RATIO_BPS <= 20_000, "DeployAll: MAX_MINT_RATIO_BPS > 20000");
         MAX_MINT_PER_DEPOSIT = vm.envOr("MAX_MINT_PER_DEPOSIT", uint256(1_000_000e9));
-
-        // -- sApiary initial index (1e9 = 1.0, set once) --
-        SAPIARY_INITIAL_INDEX = vm.envOr("SAPIARY_INITIAL_INDEX", uint256(1e9));
-        require(SAPIARY_INITIAL_INDEX > 0, "DeployAll: SAPIARY_INITIAL_INDEX must be > 0");
 
         // -- Multisig for ownership transfer (optional, skip transfer if zero) --
         MULTISIG = vm.envOr("MULTISIG_ADDRESS", address(0));

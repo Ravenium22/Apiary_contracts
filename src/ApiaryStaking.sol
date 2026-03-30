@@ -9,32 +9,17 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.s
 
 /**
  * @title ApiaryStaking
- * @notice Staking contract for Apiary protocol
- * @dev Allows users to stake APIARY tokens and receive sAPIARY (staked APIARY) in return.
- *      Staking is instant - users receive sAPIARY immediately upon staking.
- *      Phase 1: No yield distribution (epoch.distribute = 0)
- *      Phase 2: Yield distribution enabled via distributor
+ * @notice Staking contract for Apiary protocol — farm/reward pool model
+ * @dev Users stake APIARY and earn APIARY rewards distributed pro rata.
+ *      Based on the Synthetix StakingRewards pattern.
+ *
+ *      Yield flow:
+ *      1. YieldManager swaps yield for APIARY
+ *      2. YieldManager calls notifyRewardAmount(amount)
+ *      3. Rewards stream to stakers over REWARDS_DURATION (7 days)
+ *      4. Users call claim() or compound() to collect rewards
  */
-
-interface IsAPIARY {
-    function rebase(uint256 apiaryProfit_, uint256 epoch_) external returns (uint256);
-    function circulatingSupply() external view returns (uint256);
-    function balanceOf(address who) external view returns (uint256);
-    function gonsForBalance(uint256 amount) external view returns (uint256);
-    function balanceForGons(uint256 gons) external view returns (uint256);
-    function index() external view returns (uint256);
-}
-
-interface IDistributor {
-    function distribute() external returns (bool);
-}
-
-interface IApiaryToken is IERC20 {
-    function updateLastStakedTime(address staker) external;
-}
-
 contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
-    // L-02 Fix: Removed SafeMath - Solidity 0.8+ has built-in overflow checks
     using SafeERC20 for IERC20;
 
     /*//////////////////////////////////////////////////////////////
@@ -42,56 +27,69 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     address public immutable APIARY;
-    address public immutable sAPIARY;
 
     /*//////////////////////////////////////////////////////////////
-                        STATE VARIABLES
+                        CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Duration over which rewards are distributed (7 days)
+    uint256 public constant REWARDS_DURATION = 7 days;
+
+    /*//////////////////////////////////////////////////////////////
+                        REWARD STATE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Timestamp when current reward period ends
+    uint256 public periodFinish;
+
+    /// @notice APIARY distributed per second during active reward period
+    uint256 public rewardRate;
+
+    /// @notice Last time rewardPerTokenStored was updated
+    uint256 public lastUpdateTime;
+
+    /// @notice Accumulated reward per staked token (scaled by 1e18)
+    uint256 public rewardPerTokenStored;
+
+    /// @notice Snapshot of rewardPerToken for each user at last action
+    mapping(address => uint256) public userRewardPerTokenPaid;
+
+    /// @notice Accumulated unclaimed rewards for each user
+    mapping(address => uint256) public rewards;
+
+    /*//////////////////////////////////////////////////////////////
+                        STAKING STATE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Total APIARY staked across all users
     uint256 public totalStaked;
 
-    struct Epoch {
-        uint256 length;        // Length of epoch in blocks
-        uint256 number;        // Current epoch number
-        uint256 endBlock;      // Block number when epoch ends
-        uint256 distribute;    // Amount to distribute this epoch (0 in Phase 1)
-    }
+    /// @notice Individual staked balance per user
+    mapping(address => uint256) public balanceOf;
 
-    Epoch public epoch;
-
-    address public distributor;    // Distributor contract (optional, for Phase 2)
-    address public locker;         // Locker contract (optional, for lockup mechanism)
-
-    uint256 public totalBonus;     // Total bonus provided to locker
+    /// @notice Address authorized to notify new rewards (yield manager)
+    address public rewardsDistributor;
 
     /*//////////////////////////////////////////////////////////////
                         EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event Staked(address indexed user, uint256 amount, address indexed recipient);
+    event Staked(address indexed user, uint256 amount);
     event Unstaked(address indexed user, uint256 amount);
-    event Rebased(uint256 indexed epoch, uint256 distribute);
-    event DistributorSet(address indexed distributor);
-    event LockerSet(address indexed locker);
-    /// @notice L-02 Fix: Emitted when totalStaked changes
-    event TotalStakedUpdated(uint256 oldValue, uint256 newValue);
-    /// @notice LOW-05 Fix: Emitted when updateLastStakedTime fails silently
-    event StakedTimeUpdateFailed(address indexed recipient);
+    event RewardClaimed(address indexed user, uint256 reward);
+    event Compounded(address indexed user, uint256 reward);
+    event RewardAdded(uint256 reward);
+    event RewardsDistributorUpdated(address indexed distributor);
 
     /*//////////////////////////////////////////////////////////////
                         ERRORS
     //////////////////////////////////////////////////////////////*/
 
     error APIARY__INVALID_ADDRESS();
-    error APIARY__ONLY_LOCKER();
-    error APIARY__LOCKER_ALREADY_SET();
-    error APIARY__TRANSFER_FAILED();
-    /// @notice M-02 Fix: Insufficient sAPIARY balance for staking
-    error APIARY__INSUFFICIENT_SAPIARY_BALANCE();
-    /// @notice H-01 Fix: sAPIARY cannot be retrieved
-    error APIARY__SAPIARY_NOT_RETRIEVABLE();
-    /// @notice HIGH-04 Fix: Unauthorized rebase caller
-    error APIARY__UNAUTHORIZED_REBASE();
+    error APIARY__INVALID_AMOUNT();
+    error APIARY__INSUFFICIENT_BALANCE();
+    error APIARY__NOT_REWARDS_DISTRIBUTOR();
+    error APIARY__REWARD_TOO_HIGH();
 
     /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR
@@ -99,34 +97,29 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
 
     /**
      * @notice Initialize the staking contract
-     * @param _APIARY Address of the APIARY token
-     * @param _sAPIARY Address of the sAPIARY token
-     * @param _epochLength Length of each epoch in blocks
-     * @param _firstEpochNumber Starting epoch number
-     * @param _firstEpochBlock Block number when first epoch ends
+     * @param _apiary Address of the APIARY token
      * @param _initialOwner Address of the initial owner
      */
     constructor(
-        address _APIARY,
-        address _sAPIARY,
-        uint256 _epochLength,
-        uint256 _firstEpochNumber,
-        uint256 _firstEpochBlock,
+        address _apiary,
         address _initialOwner
     ) Ownable(_initialOwner) {
-        if (_APIARY == address(0)) revert APIARY__INVALID_ADDRESS();
-        if (_sAPIARY == address(0)) revert APIARY__INVALID_ADDRESS();
+        if (_apiary == address(0)) revert APIARY__INVALID_ADDRESS();
+        APIARY = _apiary;
+    }
 
-        APIARY = _APIARY;
-        sAPIARY = _sAPIARY;
+    /*//////////////////////////////////////////////////////////////
+                        MODIFIERS
+    //////////////////////////////////////////////////////////////*/
 
-        // Initialize epoch with distribute = 0 (Phase 1: no yield)
-        epoch = Epoch({
-            length: _epochLength,
-            number: _firstEpochNumber,
-            endBlock: _firstEpochBlock,
-            distribute: 0
-        });
+    modifier updateReward(address account) {
+        rewardPerTokenStored = rewardPerToken();
+        lastUpdateTime = lastTimeRewardApplicable();
+        if (account != address(0)) {
+            rewards[account] = earned(account);
+            userRewardPerTokenPaid[account] = rewardPerTokenStored;
+        }
+        _;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -134,162 +127,92 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Stake APIARY tokens and receive sAPIARY instantly
-     * @dev User sends APIARY, contract sends sAPIARY directly to recipient
-     * @param _amount Amount of APIARY to stake
-     * @param _recipient Address that will receive the sAPIARY
-     * @return bool Success status
+     * @notice Stake APIARY tokens to earn rewards
+     * @param amount Amount of APIARY to stake
      */
-    function stake(uint256 _amount, address _recipient) 
-        external 
-        whenNotPaused 
-        nonReentrant 
-        returns (bool) 
+    function stake(uint256 amount)
+        external
+        whenNotPaused
+        nonReentrant
+        updateReward(msg.sender)
     {
-        _rebase();
+        if (amount == 0) revert APIARY__INVALID_AMOUNT();
 
-        // Update the last staked time on the APIARY token contract
-        // H-06 Fix: Use try-catch to prevent staking failure if timestamp update reverts
-        // LOW-05 Fix: Emit event on failure for visibility
-        try IApiaryToken(APIARY).updateLastStakedTime(_recipient) {} catch {
-            emit StakedTimeUpdateFailed(_recipient);
-        }
+        IERC20(APIARY).safeTransferFrom(msg.sender, address(this), amount);
 
-        // Transfer APIARY from user to this contract
-        IERC20(APIARY).safeTransferFrom(msg.sender, address(this), _amount);
+        totalStaked += amount;
+        balanceOf[msg.sender] += amount;
 
-        // L-02 Fix: Emit event for totalStaked change
-        uint256 oldTotalStaked = totalStaked;
-        totalStaked = totalStaked + _amount;
-        emit TotalStakedUpdated(oldTotalStaked, totalStaked);
-
-        // M-02 Fix: Verify sufficient sAPIARY balance before transfer
-        uint256 sApiaryBalance = IERC20(sAPIARY).balanceOf(address(this));
-        if (sApiaryBalance < _amount) {
-            revert APIARY__INSUFFICIENT_SAPIARY_BALANCE();
-        }
-
-        // Transfer sAPIARY directly to recipient (1:1 with APIARY)
-        IERC20(sAPIARY).safeTransfer(_recipient, _amount);
-
-        emit Staked(msg.sender, _amount, _recipient);
-        return true;
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                        UNSTAKING FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice Unstake sAPIARY and receive APIARY (1:1 ratio)
-     * @param _amount Amount of sAPIARY to unstake
-     * @param _trigger Whether to trigger a rebase before unstaking
-     */
-    function unstake(uint256 _amount, bool _trigger) external whenNotPaused nonReentrant {
-        if (_trigger) {
-            _rebase();
-        }
-
-        // HIGH-02 Fix: CEI pattern - take sAPIARY first (interaction), then update state
-        // Take sAPIARY from user
-        IERC20(sAPIARY).safeTransferFrom(msg.sender, address(this), _amount);
-
-        // L-02 Fix: Emit event for totalStaked change
-        uint256 oldTotalStaked = totalStaked;
-        totalStaked = totalStaked - _amount;
-        emit TotalStakedUpdated(oldTotalStaked, totalStaked);
-
-        // Give APIARY to user
-        IERC20(APIARY).safeTransfer(msg.sender, _amount);
-
-        emit Unstaked(msg.sender, _amount);
+        emit Staked(msg.sender, amount);
     }
 
     /**
-     * @notice Unstake on behalf of user (only callable by locker contract)
-     * @param _recipient Address to unstake for
-     * @param _amount Amount to unstake
+     * @notice Unstake APIARY tokens
+     * @param amount Amount of APIARY to unstake
      */
-    function unstakeFor(address _recipient, uint256 _amount) external whenNotPaused nonReentrant {
-        if (msg.sender != locker) revert APIARY__ONLY_LOCKER();
+    function unstake(uint256 amount)
+        external
+        whenNotPaused
+        nonReentrant
+        updateReward(msg.sender)
+    {
+        if (amount == 0) revert APIARY__INVALID_AMOUNT();
+        if (balanceOf[msg.sender] < amount) revert APIARY__INSUFFICIENT_BALANCE();
 
-        _rebase();
+        totalStaked -= amount;
+        balanceOf[msg.sender] -= amount;
 
-        // HIGH-02 Fix: CEI pattern - take sAPIARY first, then update state
-        IERC20(sAPIARY).safeTransferFrom(_recipient, address(this), _amount);
+        IERC20(APIARY).safeTransfer(msg.sender, amount);
 
-        // L-02 Fix: Emit event for totalStaked change
-        uint256 oldTotalStaked = totalStaked;
-        totalStaked = totalStaked - _amount;
-        emit TotalStakedUpdated(oldTotalStaked, totalStaked);
-
-        IERC20(APIARY).safeTransfer(_recipient, _amount);
-
-        emit Unstaked(_recipient, _amount);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                        REBASE FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice HIGH-04 Fix: Public rebase restricted to owner or distributor
-     * @dev Prevents unauthorized triggering of epoch advancement and distribution
-     */
-    function rebase() external {
-        if (msg.sender != owner() && msg.sender != distributor) {
-            revert APIARY__UNAUTHORIZED_REBASE();
-        }
-        _rebase();
+        emit Unstaked(msg.sender, amount);
     }
 
     /**
-     * @notice Internal rebase logic - trigger rebase if epoch has ended
-     * @dev In Phase 1, distribute is always 0 (no yield)
-     *      In Phase 2, distribute will be calculated based on profits
-     *      FIX: totalStaked is updated to track rebase profit so unstake() doesn't underflow
+     * @notice Claim accumulated APIARY rewards
+     * @return reward Amount of APIARY claimed
      */
-    function _rebase() internal {
-        if (epoch.endBlock <= block.number) {
-            // FIX (Finding 1 & 4): Track the distribution amount before rebase
-            uint256 distributeAmount = epoch.distribute;
-
-            // Call rebase on sAPIARY contract
-            IsAPIARY(sAPIARY).rebase(distributeAmount, epoch.number);
-
-            // FIX (Finding 1 & 4): Update totalStaked to include rebased profit
-            // This prevents arithmetic underflow in unstake() when users withdraw
-            // their full rebased sAPIARY balance, and prevents retrieve() from
-            // treating rebased APIARY as drainable "excess"
-            if (distributeAmount > 0) {
-                uint256 oldTotalStaked = totalStaked;
-                totalStaked = totalStaked + distributeAmount;
-                emit TotalStakedUpdated(oldTotalStaked, totalStaked);
-            }
-
-            // Move to next epoch
-            epoch.endBlock = epoch.endBlock + epoch.length;
-            epoch.number++;
-
-            // Trigger distributor if set (Phase 2)
-            if (distributor != address(0)) {
-                IDistributor(distributor).distribute();
-            }
-
-            // Calculate next epoch distribution
-            // Phase 1: This will always be 0 since contractBalance <= staked
-            // Phase 2: If profits exist, distribute = balance - staked
-            uint256 balance = contractBalance();
-            uint256 staked = IsAPIARY(sAPIARY).circulatingSupply();
-
-            if (balance <= staked) {
-                epoch.distribute = 0;
-            } else {
-                epoch.distribute = balance - staked;
-            }
-
-            emit Rebased(epoch.number, epoch.distribute);
+    function claim()
+        external
+        whenNotPaused
+        nonReentrant
+        updateReward(msg.sender)
+        returns (uint256 reward)
+    {
+        reward = rewards[msg.sender];
+        if (reward > 0) {
+            rewards[msg.sender] = 0;
+            IERC20(APIARY).safeTransfer(msg.sender, reward);
+            emit RewardClaimed(msg.sender, reward);
         }
+    }
+
+    /**
+     * @notice Compound rewards — claim and restake in one transaction
+     * @return reward Amount of APIARY compounded
+     */
+    function compound()
+        external
+        whenNotPaused
+        nonReentrant
+        updateReward(msg.sender)
+        returns (uint256 reward)
+    {
+        reward = rewards[msg.sender];
+        if (reward > 0) {
+            rewards[msg.sender] = 0;
+            totalStaked += reward;
+            balanceOf[msg.sender] += reward;
+            emit Compounded(msg.sender, reward);
+        }
+    }
+
+    /**
+     * @notice Unstake all and claim rewards in one transaction
+     */
+    function exit() external {
+        // unstake and claim are both nonReentrant, so call internal versions
+        _unstakeAll();
+        _claimRewards();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -297,45 +220,80 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Get the current sAPIARY index (tracks rebase growth)
-     * @return Current index value
+     * @notice Last timestamp where rewards are applicable
+     * @return Minimum of current time and period end
      */
-    function index() public view returns (uint256) {
-        return IsAPIARY(sAPIARY).index();
+    function lastTimeRewardApplicable() public view returns (uint256) {
+        return block.timestamp < periodFinish ? block.timestamp : periodFinish;
     }
 
     /**
-     * @notice Get contract APIARY balance including bonuses
-     * @return Total APIARY held by contract
+     * @notice Current reward per staked token (scaled by 1e18)
+     * @return Accumulated reward per token
      */
-    function contractBalance() public view returns (uint256) {
-        return IERC20(APIARY).balanceOf(address(this)) + totalBonus;
+    function rewardPerToken() public view returns (uint256) {
+        if (totalStaked == 0) {
+            return rewardPerTokenStored;
+        }
+        return rewardPerTokenStored + (
+            (lastTimeRewardApplicable() - lastUpdateTime) * rewardRate * 1e18 / totalStaked
+        );
+    }
+
+    /**
+     * @notice Calculate pending rewards for a user
+     * @param account User address
+     * @return Pending APIARY reward amount
+     */
+    function earned(address account) public view returns (uint256) {
+        return (
+            balanceOf[account] * (rewardPerToken() - userRewardPerTokenPaid[account]) / 1e18
+        ) + rewards[account];
+    }
+
+    /**
+     * @notice Total rewards to be distributed in current period
+     * @return Total APIARY for the full rewards duration
+     */
+    function getRewardForDuration() external view returns (uint256) {
+        return rewardRate * REWARDS_DURATION;
     }
 
     /*//////////////////////////////////////////////////////////////
-                        LOCKER FUNCTIONS
+                        REWARD DISTRIBUTION
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Provide bonus to locked staking contract
-     * @param _amount Amount of sAPIARY to send as bonus
+     * @notice Notify contract about new rewards to distribute
+     * @dev Called by yield manager after transferring APIARY to this contract
+     * @param reward Amount of APIARY to distribute over REWARDS_DURATION
      */
-    function giveLockBonus(uint256 _amount) external {
-        if (msg.sender != locker) revert APIARY__ONLY_LOCKER();
-        
-        totalBonus = totalBonus + _amount;
-        IERC20(sAPIARY).safeTransfer(locker, _amount);
-    }
+    function notifyRewardAmount(uint256 reward)
+        external
+        updateReward(address(0))
+    {
+        if (msg.sender != rewardsDistributor && msg.sender != owner()) {
+            revert APIARY__NOT_REWARDS_DISTRIBUTOR();
+        }
 
-    /**
-     * @notice Reclaim bonus from locked staking contract
-     * @param _amount Amount of sAPIARY to reclaim
-     */
-    function returnLockBonus(uint256 _amount) external {
-        if (msg.sender != locker) revert APIARY__ONLY_LOCKER();
-        
-        totalBonus = totalBonus - _amount;
-        IERC20(sAPIARY).safeTransferFrom(locker, address(this), _amount);
+        if (block.timestamp >= periodFinish) {
+            rewardRate = reward / REWARDS_DURATION;
+        } else {
+            uint256 remaining = periodFinish - block.timestamp;
+            uint256 leftover = remaining * rewardRate;
+            rewardRate = (reward + leftover) / REWARDS_DURATION;
+        }
+
+        // Prevent setting reward rate higher than balance can support
+        uint256 balance = IERC20(APIARY).balanceOf(address(this)) - totalStaked;
+        if (rewardRate > balance / REWARDS_DURATION) {
+            revert APIARY__REWARD_TOO_HIGH();
+        }
+
+        lastUpdateTime = block.timestamp;
+        periodFinish = block.timestamp + REWARDS_DURATION;
+
+        emit RewardAdded(reward);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -343,83 +301,79 @@ contract ApiaryStaking is Ownable2Step, Pausable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Pause the contract (emergency use only)
+     * @notice Set the rewards distributor address (yield manager)
+     * @param _distributor Address of the yield manager
      */
+    function setRewardsDistributor(address _distributor) external onlyOwner {
+        if (_distributor == address(0)) revert APIARY__INVALID_ADDRESS();
+        rewardsDistributor = _distributor;
+        emit RewardsDistributorUpdated(_distributor);
+    }
+
+    /// @notice Pause the contract (emergency use only)
     function pause() external onlyOwner {
         _pause();
     }
 
-    /**
-     * @notice Unpause the contract
-     */
+    /// @notice Unpause the contract
     function unpause() external onlyOwner {
         _unpause();
     }
 
-    enum CONTRACTS {
-        DISTRIBUTOR,
-        LOCKER
-    }
-
-    /**
-     * @notice Set contract addresses for staking system components
-     * @param _contract Type of contract to set
-     * @param _address Address of the contract
-     */
-    function setContract(CONTRACTS _contract, address _address) external onlyOwner {
-        if (_address == address(0)) revert APIARY__INVALID_ADDRESS();
-
-        if (_contract == CONTRACTS.DISTRIBUTOR) {
-            distributor = _address;
-            emit DistributorSet(_address);
-        } else if (_contract == CONTRACTS.LOCKER) {
-            if (locker != address(0)) revert APIARY__LOCKER_ALREADY_SET();
-            locker = _address;
-            emit LockerSet(_address);
-        }
-    }
-
     /**
      * @notice Emergency function to retrieve accidentally sent tokens
-     * @dev Cannot withdraw APIARY that belongs to stakers or sAPIARY
+     * @dev Cannot withdraw staked APIARY or pending rewards
      * @param token Address of token to retrieve
      * @param amount Amount to retrieve
      */
     function retrieve(address token, uint256 amount) external onlyOwner {
-        // Prevent draining staked APIARY
-        // FIX (Finding 4): Use the greater of totalStaked and sAPIARY circulatingSupply
-        // as the protected amount, in case totalStaked ever drifts from the true obligation
         if (token == APIARY) {
             uint256 apiaryBalance = IERC20(APIARY).balanceOf(address(this));
-            uint256 circulating = IsAPIARY(sAPIARY).circulatingSupply();
-            uint256 obligation = totalStaked > circulating ? totalStaked : circulating;
+            uint256 obligation = totalStaked;
+            // Also protect unclaimed rewards in the contract
+            if (block.timestamp < periodFinish) {
+                obligation += (periodFinish - block.timestamp) * rewardRate;
+            }
             uint256 excess = apiaryBalance > obligation ? apiaryBalance - obligation : 0;
-            require(amount <= excess, "ApiaryStaking: cannot drain staked funds");
+            require(amount <= excess, "ApiaryStaking: cannot drain staked or reward funds");
         }
 
-        // H-01 Fix: Block sAPIARY retrieval entirely to protect staker pool
-        if (token == sAPIARY) {
-            revert APIARY__SAPIARY_NOT_RETRIEVABLE();
-        }
-
-        // Retrieve specified token
         if (token != address(0) && amount > 0) {
             IERC20(token).safeTransfer(msg.sender, amount);
         }
     }
 
-    /**
-     * @notice H-03 Fix: Separate ETH withdrawal function
-     * @dev Prevents ETH being sent unintentionally during token retrieval
-     *      and avoids DoS if owner contract can't receive ETH
-     */
+    /// @notice Recover accidentally sent ETH
     function retrieveETH() external onlyOwner {
         uint256 ethBalance = address(this).balance;
-        if (ethBalance == 0) revert APIARY__TRANSFER_FAILED();
+        require(ethBalance > 0, "ApiaryStaking: no ETH to retrieve");
         (bool success,) = payable(msg.sender).call{ value: ethBalance }("");
-        if (!success) revert APIARY__TRANSFER_FAILED();
+        require(success, "ApiaryStaking: ETH transfer failed");
     }
 
-    /// @notice LOW-01 Fix: Allow contract to receive ETH (makes retrieveETH() functional)
+    /// @notice Allow contract to receive ETH
     receive() external payable {}
+
+    /*//////////////////////////////////////////////////////////////
+                        INTERNAL FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    function _unstakeAll() internal whenNotPaused nonReentrant updateReward(msg.sender) {
+        uint256 amount = balanceOf[msg.sender];
+        if (amount > 0) {
+            totalStaked -= amount;
+            balanceOf[msg.sender] = 0;
+            IERC20(APIARY).safeTransfer(msg.sender, amount);
+            emit Unstaked(msg.sender, amount);
+        }
+    }
+
+    function _claimRewards() internal whenNotPaused updateReward(msg.sender) {
+        uint256 reward = rewards[msg.sender];
+        if (reward > 0) {
+            rewards[msg.sender] = 0;
+            IERC20(APIARY).safeTransfer(msg.sender, reward);
+            emit RewardClaimed(msg.sender, reward);
+        }
+    }
 }

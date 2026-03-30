@@ -100,12 +100,12 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
     // M-09 Fix: Maximum discount rate (50% = 5000 bps)
     uint256 public constant MAX_DISCOUNT_RATE = 5000;
     
-    // Berachain average block time: ~5 seconds
-    // 7 days = 7 * 24 * 60 * 60 / 5 = 120,960 blocks
-    uint256 public constant DEFAULT_VESTING_TERM = 120_960;
-    
-    // Minimum vesting term: 1 day = 17,280 blocks
-    uint256 public constant MINIMUM_VESTING_TERM = 17_280;
+    // Berachain average block time: ~3 seconds
+    // 7 days = 7 * 24 * 60 * 60 / 3 = 201,600 blocks
+    uint256 public constant DEFAULT_VESTING_TERM = 201_600;
+
+    // Minimum vesting term: 1 day = 28,800 blocks
+    uint256 public constant MINIMUM_VESTING_TERM = 28_800;
 
     /*//////////////////////////////////////////////////////////////
                     DYNAMIC DISCOUNT TIER CONSTANTS
@@ -332,10 +332,11 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
         // Default staleness threshold: 1 hour
         priceFeedStalenessThreshold = 3600;
 
-        // L-03 Fix: Initialize blocksPerDay (86400 seconds / 5 seconds per block = 17280)
-        blocksPerDay = 17_280;
+        // L-03 Fix: Initialize blocksPerDay (86400 seconds / 3 seconds per block = 28800)
+        blocksPerDay = 28_800;
 
-        // M-NEW-02 Fix: Initialize price deviation protection (20% max deviation)
+        // Launch at 20% to avoid bond reverts with thin initial liquidity.
+        // Owner should tighten via setMaxPriceDeviation() as V2 liquidity grows.
         maxPriceDeviation = 2000; // 20% in basis points
 
         // Daily issuance cap: 3% of total APIARY supply per day (per doc)
@@ -736,6 +737,43 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
      * @param _token Token to recover
      * @param _amount Amount to recover
      */
+    /// @notice AUDIT-FIX-04: Refresh cached oracle prices without requiring a bond deposit.
+    /// @dev Allows a keeper or owner to update lastCachedApiaryPrice and lastCachedIbgtPrice
+    ///      so that maxPayout() and dynamic discount tiers use fresh data.
+    function refreshCachedPrices() external {
+        uint256 apiaryPrice = twap.consult(10 ** IERC20Metadata(APIARY).decimals());
+        lastCachedApiaryPrice = apiaryPrice;
+        if (address(ibgtPriceFeed) != address(0)) {
+            (, int256 answer,, uint256 updatedAt,) = ibgtPriceFeed.latestRoundData();
+            if (answer > 0 && block.timestamp - updatedAt <= priceFeedStalenessThreshold) {
+                lastCachedIbgtPrice = uint256(answer);
+            }
+        }
+    }
+
+    /// @notice AUDIT-FIX-06: Grace period (in blocks) after vestingEnd before bonds can be written off
+    /// @dev ~90 days at 5s blocks = 1,555,200 blocks
+    uint256 public constant ABANDONED_BOND_GRACE_PERIOD = 1_555_200;
+
+    /// @notice AUDIT-FIX-06: Write off fully-vested bonds that have been unclaimed past the grace period.
+    /// @dev Decrements totalUnredeemedPayout so the locked APIARY can be recovered via clawBackTokens.
+    /// @param _depositor The bond holder whose bonds are being written off
+    /// @param _bondIndexes Array of bond indexes to write off
+    function writeOffAbandonedBonds(address _depositor, uint256[] calldata _bondIndexes) external onlyOwner {
+        Bond[] storage bonds = userBonds[_depositor];
+        for (uint256 i; i < _bondIndexes.length; ++i) {
+            Bond storage bond = bonds[_bondIndexes[i]];
+            if (bond.payout == 0) revert APIARY__NO_REDEEMABLE_BOND();
+            if (bond.claimed >= bond.payout) revert APIARY__BOND_ALREADY_REDEEMED();
+            if (bond.vestingEnd + ABANDONED_BOND_GRACE_PERIOD >= block.number) {
+                revert APIARY__INVALID_BOND_INDEX(); // Not yet eligible for write-off
+            }
+            uint256 unclaimed = uint256(bond.payout) - uint256(bond.claimed);
+            bond.claimed = bond.payout; // Mark as fully claimed
+            totalUnredeemedPayout -= unclaimed;
+        }
+    }
+
     function clawBackTokens(address _token, uint256 _amount) external onlyOwner {
         if (_token == address(0)) revert APIARY__ZERO_ADDRESS();
         if (_amount == 0) revert APIARY__INVALID_AMOUNT();
@@ -811,7 +849,12 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
             uint256 carryForward = 0;
             if (dailyIssuanceResetBlock != 0 && dailyIssuanceAmount > 0) {
                 uint256 prevBucketEnd = dailyIssuanceResetBlock + blocksPerDay;
-                if (block.number < prevBucketEnd + blocksPerDay) {
+                // AUDIT-FIX-07: Guard against underflow when blocksPerDay is changed mid-epoch.
+                // If block.number < prevBucketEnd (possible after blocksPerDay increase),
+                // carry forward 100% of previous issuance (conservative).
+                if (block.number < prevBucketEnd) {
+                    carryForward = dailyIssuanceAmount;
+                } else if (block.number < prevBucketEnd + blocksPerDay) {
                     // Blocks elapsed since previous bucket ended
                     uint256 blocksSincePrevEnd = block.number - prevBucketEnd;
                     if (blocksSincePrevEnd < blocksPerDay) {
@@ -1214,7 +1257,14 @@ contract ApiaryBondDepository is Ownable2Step, Pausable, ReentrancyGuard {
             return treasuryValueInApiary.mulDiv(terms.maxPayout, BPS);
         }
 
-        // Fallback before first deposit (cached prices are zero)
+        // AUDIT-FIX-09: Before first deposit (cached prices are zero), return MINIMUM_PAYOUT
+        // instead of allocation-based fallback. The allocation fallback can be orders of
+        // magnitude larger than actual treasury value, violating the spec's "1% of treasury value".
+        if (lastCachedApiaryPrice == 0) {
+            return MINIMUM_PAYOUT;
+        }
+
+        // Fallback when treasury value estimate returns 0 but prices are cached
         uint256 totalAllocatedToTreasury = IApiaryToken(APIARY).allocationLimits(treasury);
         return totalAllocatedToTreasury.mulDiv(terms.maxPayout, BPS);
     }

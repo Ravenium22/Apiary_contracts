@@ -17,7 +17,7 @@ jobs:
         env:
           RPC_URL: https://rpc.berachain.com
           PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
-          TWAP_ADDRESS: '0x2bdf51D4500434dDdB7e6B350Ad23aa7A2063Fbb'
+          TWAP_ADDRESS: '0xDBA9624dfd8aC6198440FFfb2C98EE428ec0263c'
         run: |
           echo "Checking oracle state..."
           UPDATE_COUNT=$(cast call $TWAP_ADDRESS "updateCount()(uint256)" --rpc-url $RPC_URL)

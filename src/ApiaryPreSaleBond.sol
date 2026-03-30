@@ -57,8 +57,8 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
                         CONSTANTS AND IMMUTABLES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Total APIARY allocated to pre-sale (55% of 200k supply)
-    uint256 public constant PRE_SALE_TOTAL_APIARY_AMOUNT = 110_000e9; // 110,000 APIARY (9 decimals)
+    /// @notice Legacy constant kept for reference — actual supply is determined by contract APIARY balance
+    uint256 public constant PRE_SALE_TOTAL_APIARY_AMOUNT = 110_000e9;
 
     /// @notice Vesting duration from TGE
     uint48 public constant PRE_SALE_VESTING_DURATION = 5 days;
@@ -219,24 +219,30 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
     function purchaseApiary(
         uint256 honeyAmount,
         bytes32[] calldata merkleProof,
-        uint256 minApiaryAmount
+        uint256 minApiaryAmount,
+        uint256 maxAllocation
     ) external whenNotPaused nonReentrant {
         // Check pre-sale is live
         if (currentPreSaleBondState != PreSaleBondState.Live) {
             revert APIARY__PRE_SALE_NOT_LIVE();
         }
 
-        // Check user hasn't maxed out allocation
-        if (_investorAllocations[msg.sender].totalAmount == bondPurchaseLimit) {
-            revert APIARY__MAX_BOND_REACHED();
-        }
+        // Determine user's allocation limit
+        // If whitelist enabled: use merkle-verified maxAllocation (NFT-proportional)
+        // If whitelist disabled: fall back to flat bondPurchaseLimit
+        uint256 userAllocationLimit = bondPurchaseLimit;
 
-        // Verify whitelist (if enabled)
         if (isWhitelistEnabled) {
-            bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(msg.sender))));
+            bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(msg.sender, maxAllocation))));
             if (!MerkleProof.verify(merkleProof, merkleRoot, leaf)) {
                 revert APIARY__INVALID_PROOF();
             }
+            userAllocationLimit = maxAllocation;
+        }
+
+        // Check user hasn't maxed out allocation
+        if (_investorAllocations[msg.sender].totalAmount >= userAllocationLimit) {
+            revert APIARY__MAX_BOND_REACHED();
         }
 
         // Check APIARY availability
@@ -275,7 +281,7 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
         }
 
         // Cap purchase at user's remaining allocation
-        uint256 remainingAllocation = bondPurchaseLimit - _investorAllocations[msg.sender].totalAmount;
+        uint256 remainingAllocation = userAllocationLimit - _investorAllocations[msg.sender].totalAmount;
         if (apiaryPurchaseAmount > remainingAllocation) {
             apiaryPurchaseAmount = remainingAllocation;
         }
@@ -366,22 +372,12 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Mint total sold APIARY to contract for vesting distribution
-     * @dev Called after pre-sale ends, before TGE starts
-     * @dev Only mints exactly what was sold, no excess
-     * @dev CODEX-NOTE Fix: Can only be called once to prevent double-minting
+     * @notice Legacy: no longer needed with Option A (pre-funded by deployer transfer)
+     * @dev Kept for interface compatibility. Pre-sale is funded by transferring
+     *      APIARY from deployer to this contract before starting the sale.
      */
     bool public apiaryMinted;
     error APIARY__ALREADY_MINTED();
-
-    function mintApiary() external onlyOwner {
-        if (apiaryMinted) revert APIARY__ALREADY_MINTED();
-        apiaryMinted = true;
-
-        apiaryToken.mint(address(this), totalBondsSold);
-
-        emit TotalApiaryMinted(totalBondsSold);
-    }
 
     /**
      * @notice Start the pre-sale (transition to Live state)
@@ -552,10 +548,14 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
 
     /**
      * @notice Calculate APIARY tokens still available for purchase
+     * @dev Option A: supply is determined by APIARY balance in contract minus unclaimed obligations
      * @return Available APIARY amount
      */
     function apiaryTokensAvailable() public view returns (uint256) {
-        return PRE_SALE_TOTAL_APIARY_AMOUNT - totalBondsSold;
+        if (address(apiaryToken) == address(0)) return 0;
+        uint256 balance = apiaryToken.balanceOf(address(this));
+        uint256 obligations = totalBondsSold - totalClaimedByUsers;
+        return balance > obligations ? balance - obligations : 0;
     }
 
     /**
@@ -612,13 +612,14 @@ contract ApiaryPreSaleBond is IApiaryPreSaleBond, Ownable2Step, Pausable, Reentr
      */
     function isWhitelisted(
         address user,
-        bytes32[] calldata merkleProof
+        bytes32[] calldata merkleProof,
+        uint256 maxAllocation
     ) external view returns (bool) {
         if (!isWhitelistEnabled) {
             return true;
         }
 
-        bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(user))));
+        bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(user, maxAllocation))));
         return MerkleProof.verify(merkleProof, merkleRoot, leaf);
     }
 }

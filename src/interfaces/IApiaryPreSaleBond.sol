@@ -18,7 +18,7 @@ interface IApiaryPreSaleBond {
      * @param merkleProof Merkle proof for whitelist verification
      * @param minApiaryAmount Minimum APIARY to receive (slippage protection)
      */
-    function purchaseApiary(uint256 honeyAmount, bytes32[] calldata merkleProof, uint256 minApiaryAmount) external;
+    function purchaseApiary(uint256 honeyAmount, bytes32[] calldata merkleProof, uint256 minApiaryAmount, uint256 maxAllocation) external;
 
     /**
      * @notice Unlock and claim vested APIARY tokens
@@ -30,9 +30,8 @@ interface IApiaryPreSaleBond {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Mint total sold APIARY to contract for distribution
+     * @notice Legacy: no longer needed with Option A (pre-funded by deployer transfer)
      */
-    function mintApiary() external;
 
     /**
      * @notice Start the pre-sale (NotStarted → Live)
@@ -132,5 +131,5 @@ interface IApiaryPreSaleBond {
      * @param merkleProof Merkle proof
      * @return True if whitelisted
      */
-    function isWhitelisted(address user, bytes32[] calldata merkleProof) external view returns (bool);
+    function isWhitelisted(address user, bytes32[] calldata merkleProof, uint256 maxAllocation) external view returns (bool);
 }
