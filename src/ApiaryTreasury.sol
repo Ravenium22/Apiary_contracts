@@ -230,15 +230,18 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
                 uint256 calculatedValue = lpCalculator.valuation(_token, _amount);
                 maxReasonableValue = (calculatedValue * maxMintRatioBps) / 10000;
             } else if (_token == IBGT && address(ibgtPriceFeed) != address(0)) {
-                // Use iBGT/USD oracle for accurate valuation (HONEY = $1 USD).
-                // Previous code assumed 1 iBGT ≈ 1 APIARY after decimal normalization,
-                // which freezes bonds when iBGT/APIARY price ratio exceeds maxMintRatioBps.
+                // Use iBGT/USD oracle + TWAP to convert iBGT deposit to APIARY-equivalent.
+                // 1. iBGT → HONEY: amount * ibgtPrice / feedDecimals
+                // 2. HONEY → APIARY: honeyValue / apiaryPrice (from TWAP)
                 (, int256 answer,, uint256 updatedAt,) = ibgtPriceFeed.latestRoundData();
                 if (answer > 0 && (block.timestamp - updatedAt <= ibgtPriceFeedStaleness)) {
-                    // Convert iBGT deposit to 9-decimal APIARY-equivalent value:
-                    //   _amount(18-dec) * ibgtPrice / feedDecimals → USD value(18-dec)
-                    //   USD(18-dec) * 1e9 / 1e18 → APIARY-equivalent(9-dec)
-                    uint256 valueInApiary = (_amount * uint256(answer) * 1e9) / (10 ** ibgtPriceFeed.decimals() * 1e18);
+                    // Step 1: iBGT to HONEY value (18-dec)
+                    uint256 honeyValue = (_amount * uint256(answer)) / (10 ** ibgtPriceFeed.decimals());
+                    // Step 2: HONEY to APIARY-equivalent (9-dec) using TWAP price
+                    uint256 apiaryPrice = address(twapOracle) != address(0) ? twapOracle.consult(1e9) : 0;
+                    uint256 valueInApiary = apiaryPrice > 0
+                        ? (honeyValue * 1e9) / apiaryPrice  // honeyValue(18) * 1e9 / price(18) = 9-dec
+                        : (_amount * uint256(answer) * 1e9) / (10 ** ibgtPriceFeed.decimals() * 1e18); // fallback
                     maxReasonableValue = (valueInApiary * maxMintRatioBps) / 10000;
                 } else {
                     // AUDIT-FIX-05: Revert on stale oracle instead of using a naive fallback.
