@@ -13,7 +13,7 @@
 
 const { ethers } = require('ethers');
 
-const TWAP_ADDRESS = process.env.TWAP_ADDRESS || '0x583713ba93b261D6C129503455b65C2CFC679F8c';
+const TWAP_ADDRESS = process.env.TWAP_ADDRESS || '0x58b0042e39764de33f9a6fdcdcdf15ffba59507f';
 const RPC_URL = process.env.RPC_URL || 'https://rpc.berachain.com';
 const POLL_MS = (parseInt(process.env.POLL_MINUTES) || 10) * 60 * 1000;
 
