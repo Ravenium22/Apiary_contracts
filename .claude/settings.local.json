@@ -31,7 +31,9 @@
       "Bash(__NEW_LINE_e131841352c6a89f__ echo:*)",
       "Bash(cast call:*)",
       "Bash(__NEW_LINE_884b8a2138a34a48__ echo:*)",
-      "Bash(cast send:*)"
+      "Bash(cast send:*)",
+      "Bash(ls \"E:\\\\BeraReserve-contracts-main\"/*.csv \"E:\\\\BeraReserve-contracts-main\"/*.txt)",
+      "Bash(node scripts/generateMerkleTree.js)"
     ]
   }
 }

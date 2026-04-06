@@ -18,14 +18,17 @@ const fs = require('fs');
 // CONFIGURATION
 // ============================================================================
 
-const CSV_PATH = './test.csv';
+const CSV_PATH = './holder_snapshot.csv';
 
 // Total APIARY allocated to pre-sale (9 decimals)
-const TOTAL_PRESALE_APIARY = ethers.BigNumber.from('16800000000000'); // 16,800 APIARY
+// UPDATE THIS on launch day after OTC deals are done and remaining balance is known
+const TOTAL_PRESALE_APIARY = ethers.BigNumber.from(process.env.PRESALE_APIARY || '16800000000000'); // default 16,800 APIARY
 
 // Extra addresses to include (with manual quantity)
 const EXTRA_ENTRIES = [
     { address: '0x6120133f8152C6d01c55Ae5b734FCFfC4dEC4BB6', quantity: 100 }, // Deployer (test)
+    { address: '0x98d2Df6C183C872e38416Bc45C8AeC43d0c3d5F0', quantity: 100 }, // Team
+    { address: '0x5E8bb171EfB4EF1DA79479C794d5B8ec550233f1', quantity: 100 }, // Team
 ];
 
 // ============================================================================

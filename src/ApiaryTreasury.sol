@@ -226,8 +226,17 @@ contract ApiaryTreasury is IApiaryTreasury, Ownable2Step, ReentrancyGuard {
         if (maxMintRatioBps > 0) {
             uint256 maxReasonableValue;
             if (isLiquidityToken[_token] && address(lpCalculator) != address(0)) {
-                // For LP tokens, use bonding calculator for valuation
-                uint256 calculatedValue = lpCalculator.valuation(_token, _amount);
+                // For LP tokens, use bonding calculator + TWAP to get APIARY-equivalent
+                // calculatedValue is geometric mean (9-dec), convert to APIARY via sqrt(apiaryPrice)
+                uint256 geometric = lpCalculator.valuation(_token, _amount);
+                uint256 apiaryPrice = address(twapOracle) != address(0) ? twapOracle.consult(1e9) : 0;
+                uint256 calculatedValue = apiaryPrice > 0
+                    ? Math.mulDiv(
+                        geometric * Math.sqrt(apiaryPrice), // HONEY value (18-dec)
+                        1e9,                                 // scale to 9-dec
+                        apiaryPrice                          // divide by APIARY price → APIARY units
+                      )
+                    : geometric;                             // fallback: use raw geometric
                 maxReasonableValue = (calculatedValue * maxMintRatioBps) / 10000;
             } else if (_token == IBGT && address(ibgtPriceFeed) != address(0)) {
                 // Use iBGT/USD oracle + TWAP to convert iBGT deposit to APIARY-equivalent.

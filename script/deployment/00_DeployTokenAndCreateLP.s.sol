@@ -51,20 +51,13 @@ contract DeployTokenAndCreateLP is Script {
         address kodiakRouter = vm.envAddress("KODIAK_ROUTER");
         address kodiakFactory = vm.envAddress("KODIAK_FACTORY");
 
-        uint256 v2SeedApiary = vm.envOr("V2_SEED_APIARY", uint256(100e9));       // 100 APIARY
-        uint256 v2SeedHoney = vm.envOr("V2_SEED_HONEY", uint256(50000000000000000)); // 0.05 HONEY
-
         console.log("==============================================");
         console.log("  PHASE 0: Deploy APIARY + Create Pools");
         console.log("==============================================");
         console.log("Deployer:", deployer);
         console.log("Chain ID:", block.chainid);
-        console.log("V2 seed: 100 APIARY + 0.05 HONEY");
-        console.log("V3 pool: init below Island range for 100% APIARY deposit");
-
-        uint256 honeyBal = IERC20(honey).balanceOf(deployer);
-        console.log("Deployer HONEY balance:", honeyBal);
-        require(honeyBal >= v2SeedHoney, "Need at least 0.05 HONEY");
+        console.log("V2: create pair only (multisig seeds liquidity later)");
+        console.log("V3: create + init pool (multisig deposits via Island UI)");
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -75,23 +68,12 @@ contract DeployTokenAndCreateLP is Script {
         console.log("  APIARY:", apiaryAddr);
         console.log("  Initial supply:", apiary.totalSupply());
 
-        // --- Step 2: Create V2 pair + tiny seed ---
-        console.log("STEP 2: Creating V2 pair + seed...");
+        // --- Step 2: Create V2 pair (empty — multisig adds liquidity later) ---
+        console.log("STEP 2: Creating V2 pair...");
         IKodiakFactory v2Factory = IKodiakFactory(kodiakFactory);
         v2PairAddr = v2Factory.createPair(apiaryAddr, honey);
         console.log("  V2 pair:", v2PairAddr);
-
-        apiary.approve(kodiakRouter, v2SeedApiary);
-        IERC20(honey).approve(kodiakRouter, v2SeedHoney);
-
-        IKodiakRouter(kodiakRouter).addLiquidity(
-            apiaryAddr, honey,
-            v2SeedApiary, v2SeedHoney,
-            0, 0,
-            deployer,
-            block.timestamp + 300
-        );
-        console.log("  V2 seeded: 100 APIARY + 0.05 HONEY");
+        console.log("  NOTE: Pair is empty. Multisig must addLiquidity before TWAP works.");
 
         // --- Step 3: Create V3 pool + initialize below Island range ---
         console.log("STEP 3: Creating V3 pool...");
@@ -118,11 +100,13 @@ contract DeployTokenAndCreateLP is Script {
         console.log("    APIARY_ADDRESS=<above>");
         console.log("    LP_PAIR_ADDRESS=<V2 pair above>");
         console.log("");
-        console.log("  NEXT: Deploy Island + deposit via cast:");
-        console.log("  1. cast send ISLAND_FACTORY deployVault(...)");
-        console.log("  2. cast send APIARY approve(islandRouter, 30000e9)");
-        console.log("  3. cast send islandRouter addLiquidity(island, 30000e9, 0, ...)");
-        console.log("  4. Run DeployAll.s.sol");
+        console.log("  NEXT STEPS:");
+        console.log("  1. Deployer transfers ALL APIARY to multisig");
+        console.log("  2. Multisig seeds V2 via Kodiak addLiquidity (APIARY + HONEY)");
+        console.log("  3. Multisig deposits APIARY to V3 Island");
+        console.log("  4. Multisig does OTC transfers");
+        console.log("  5. Run DeployAll.s.sol");
+        console.log("  6. Multisig funds pre-sale with remaining APIARY");
         console.log("==============================================");
     }
 }
