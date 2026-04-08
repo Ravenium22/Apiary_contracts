@@ -33,7 +33,10 @@
       "Bash(__NEW_LINE_884b8a2138a34a48__ echo:*)",
       "Bash(cast send:*)",
       "Bash(ls \"E:\\\\BeraReserve-contracts-main\"/*.csv \"E:\\\\BeraReserve-contracts-main\"/*.txt)",
-      "Bash(node scripts/generateMerkleTree.js)"
+      "Bash(node scripts/generateMerkleTree.js)",
+      "Bash(cast balance:*)",
+      "Bash(cast calldata:*)",
+      "Bash(PRESALE_APIARY=60802000000000 node scripts/generateMerkleTree.js)"
     ]
   }
 }

@@ -197,6 +197,12 @@ interface IApiaryKodiakAdapter {
         uint256 amountIn
     ) external view returns (uint256 amountOut);
 
+    /// @notice Get expected output for multi-hop swap path
+    function getExpectedMultiHopOutput(
+        address[] calldata path,
+        uint256 amountIn
+    ) external view returns (uint256 amountOut);
+
     /// @notice Quote LP tokens for adding liquidity
     function quoteAddLiquidity(
         address tokenA,

@@ -11,6 +11,12 @@ import { IApiaryKodiakAdapter } from "./interfaces/IApiaryKodiakAdapter.sol";
 import { IApiaryToken } from "./interfaces/IApiaryToken.sol";
 import { IAggregatorV3 } from "./interfaces/IAggregatorV3.sol";
 import { IApiaryUniswapV2TwapOracle } from "./interfaces/IApiaryUniswapV2TwapOracle.sol";
+import { IApiaryTreasury } from "./interfaces/IApiaryTreasury.sol";
+
+interface IERC4626 {
+    function asset() external view returns (address);
+    function redeem(uint256 shares, address receiver, address owner) external returns (uint256 assets);
+}
 
 interface IApiaryStaking {
     function notifyRewardAmount(uint256 reward) external;
@@ -220,6 +226,11 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Minimum time between yield executions (anti-griefing)
     uint256 public constant MIN_EXECUTION_INTERVAL = 1 hours;
 
+    /// @notice V2 FIX: Berachain wrapped native (WBERA) — used as routing token when direct
+    /// pairs don't exist. iBGT only has a Kodiak pair with WBERA, so iBGT→HONEY and
+    /// iBGT→APIARY require multi-hop routing through WBERA.
+    address public constant WBERA = 0x6969696969696969696969696969696969696969;
+
     /// @notice Basis points denominator
     uint256 public constant BASIS_POINTS = 10000;
 
@@ -283,6 +294,14 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
 
     /// @notice H-01 Fix: Emitted when keeper is updated
     event KeeperUpdated(address indexed oldKeeper, address indexed newKeeper);
+    /// @notice V2 FIX: emitted when iBGT is pulled from treasury and staked on Infrared
+    event StakedFromTreasury(uint256 amount);
+    /// @notice V2 FIX: emitted when iBGT is unstaked from Infrared back to this contract
+    event UnstakedFromInfrared(uint256 amount);
+    /// @notice V2 FIX: emitted when LP staking is skipped (no farm registered or stake failed)
+    event LPStakeSkipped(address indexed lpToken, uint256 amount);
+    /// @notice V2 FIX: emitted when reward token swap is skipped (no swap path available)
+    event RewardSwapSkipped(address indexed rewardToken, uint256 amount);
 
     /// @notice M-01 Fix: Emitted when yield is forwarded in emergency mode
     event EmergencyYieldForwarded(uint256 amount);
@@ -327,6 +346,8 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice FIX (Finding 2): iBGT price feed returned stale or invalid data
     error APIARY__YIELD_STALE_PRICE_FEED();
     error APIARY__YIELD_INVALID_PRICE();
+    /// @notice V2 FIX: invalid amount passed to stakeFromTreasury
+    error APIARY__INVALID_AMOUNT();
 
     /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
@@ -479,6 +500,47 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         emit YieldExecuted(currentStrategy, totalYield, honeySwapped, apiaryBurned, lpCreated, compounded);
     }
 
+    /**
+     * @notice V2 FIX: Pull iBGT from treasury and stake it on Infrared.
+     * @dev Closes the gap where iBGT could enter the treasury but never get staked.
+     *      Calls treasury.pullIBGTForStaking → approves adapter → adapter.stake.
+     *      Only callable by keeper or owner (same as executeYield).
+     * @param amount Amount of iBGT to pull and stake (18 decimals)
+     */
+    function stakeFromTreasury(uint256 amount) external whenNotPaused nonReentrant {
+        if (msg.sender != keeper && msg.sender != owner()) {
+            revert APIARY__ONLY_KEEPER_OR_OWNER();
+        }
+        if (amount == 0) revert APIARY__INVALID_AMOUNT();
+        if (treasury == address(0) || infraredAdapter == address(0)) {
+            revert APIARY__ADAPTER_NOT_SET();
+        }
+
+        IApiaryTreasury(treasury).pullIBGTForStaking(amount);
+        ibgtToken.forceApprove(infraredAdapter, amount);
+        IApiaryInfraredAdapter(infraredAdapter).stake(amount);
+
+        emit StakedFromTreasury(amount);
+    }
+
+    /**
+     * @notice V2 FIX: Unstake iBGT from Infrared. iBGT is held in this contract afterwards.
+     * @dev Inverse of stakeFromTreasury. After calling, owner uses emergencyWithdraw to
+     *      send iBGT back to the multisig, which then calls treasury.syncIBGTAccounting()
+     *      with the appropriate surplus amount to update treasury accounting.
+     * @param amount Amount of iBGT to unstake (18 decimals)
+     */
+    function unstakeFromInfrared(uint256 amount) external whenNotPaused nonReentrant returns (uint256 unstakedAmount) {
+        if (msg.sender != keeper && msg.sender != owner()) {
+            revert APIARY__ONLY_KEEPER_OR_OWNER();
+        }
+        if (amount == 0) revert APIARY__INVALID_AMOUNT();
+        if (infraredAdapter == address(0)) revert APIARY__ADAPTER_NOT_SET();
+
+        unstakedAmount = IApiaryInfraredAdapter(infraredAdapter).unstake(amount);
+        emit UnstakedFromInfrared(unstakedAmount);
+    }
+
     /*//////////////////////////////////////////////////////////////
                         STRATEGY IMPLEMENTATIONS
     //////////////////////////////////////////////////////////////*/
@@ -501,7 +563,10 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     {
         if (emergencyMode) {
             // Emergency: forward all to treasury
-            ibgtToken.safeTransfer(treasury, totalYield);
+            // V2 FIX: use deposit() instead of safeTransfer to update totalReserves[IBGT].
+            //         Requires this contract to be set as reserve depositor on treasury.
+            ibgtToken.forceApprove(treasury, totalYield);
+            IApiaryTreasury(treasury).deposit(totalYield, address(ibgtToken), 0);
             // M-01 Fix: Emit event for emergency mode visibility
             emit EmergencyYieldForwarded(totalYield);
             return (0, 0, 0);
@@ -535,10 +600,13 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
             lpCreated = _createAndStakeLP(apiaryForLP, honeyForLP);
         }
 
-        // 5. Any remaining HONEY goes to treasury (dust stays in contract if < threshold)
+        // 5. Any remaining HONEY goes to treasury via deposit() so it's properly accounted
+        // V2 FIX: use deposit() instead of safeTransfer to update totalReserves[HONEY].
+        //         Requires HONEY to be set as reserve token + this contract as reserve depositor.
         uint256 remainingHoney = honeySwapped - honeyForLP;
         if (remainingHoney > 0) {
-            honeyToken.safeTransfer(treasury, remainingHoney);
+            honeyToken.forceApprove(treasury, remainingHoney);
+            IApiaryTreasury(treasury).deposit(remainingHoney, address(honeyToken), 0);
         }
     }
 
@@ -593,7 +661,10 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         if (currentMode == ProtocolMode.GROWTH) {
             // GROWTH mode: Compound iBGT (keep as reserves)
             compounded = (totalYield * cfg.toCompound) / BASIS_POINTS;
-            ibgtToken.safeTransfer(treasury, compounded);
+            // V2 FIX: use deposit() instead of safeTransfer to update totalReserves[IBGT].
+            //         Requires this contract to be set as reserve depositor on treasury.
+            ibgtToken.forceApprove(treasury, compounded);
+            IApiaryTreasury(treasury).deposit(compounded, address(ibgtToken), 0);
 
             // Remaining follows Phase 1 logic
             uint256 remaining = totalYield - compounded;
@@ -662,7 +733,10 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
      */
     function _executePhase3Strategy(uint256 totalYield) internal returns (uint256 compounded) {
         // Placeholder: Send to treasury for vBGT conversion
-        ibgtToken.safeTransfer(treasury, totalYield);
+        // V2 FIX: use deposit() instead of safeTransfer to update totalReserves[IBGT].
+        //         Requires this contract to be set as reserve depositor on treasury.
+        ibgtToken.forceApprove(treasury, totalYield);
+        IApiaryTreasury(treasury).deposit(totalYield, address(ibgtToken), 0);
         compounded = totalYield;
     }
 
@@ -694,6 +768,21 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
                 // iBGT reward — add directly
                 claimedAmount += rewardAmounts[i];
             } else {
+                // V2 FIX: If the reward is an ERC4626 vault wrapping iBGT (e.g. wiBGT),
+                // unwrap via redeem() instead of trying to swap. 1:1 conversion, no slippage.
+                try IERC4626(rewardTokens[i]).asset() returns (address underlying) {
+                    if (underlying == address(ibgtToken)) {
+                        try IERC4626(rewardTokens[i]).redeem(rewardAmounts[i], address(this), address(this)) returns (uint256 ibgtOut) {
+                            claimedAmount += ibgtOut;
+                            continue;
+                        } catch {
+                            // Fall through to swap path
+                        }
+                    }
+                } catch {
+                    // Not an ERC4626 vault, fall through to swap path
+                }
+
                 // Non-iBGT reward — swap to iBGT via Kodiak
                 if (kodiakAdapter == address(0)) {
                     revert APIARY__ADAPTER_NOT_SET();
@@ -783,33 +872,46 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
 
         if (amount == 0) return 0;
 
-        // FIX (Finding 2): Use oracle-based price floor instead of spot quote from the swap pool.
-        // Spot quotes from the same pool can be manipulated by sandwich attackers — both the
-        // quote and the execution reflect the manipulated price, making slippage checks useless.
-        // Oracle-based floor provides a manipulation-resistant minimum.
-        uint256 minOutput;
-        uint256 spotExpected = IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
+        // V2 FIX: Try direct iBGT/HONEY swap first; if no pair exists, fall back to
+        // multi-hop iBGT → WBERA → HONEY (Kodiak doesn't have a direct iBGT/HONEY pair).
+        ibgtToken.forceApprove(kodiakAdapter, amount);
+
+        // Try direct swap first
+        try IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
             address(ibgtToken),
             address(honeyToken),
             amount
-        );
-        uint256 spotMin = _calculateMinOutput(spotExpected);
+        ) returns (uint256 spotExpected) {
+            uint256 spotMin = _calculateMinOutput(spotExpected);
+            uint256 oracleMin = _getOracleMinOutputHoney(amount);
+            uint256 minOutput = oracleMin > spotMin ? oracleMin : spotMin;
 
-        uint256 oracleMin = _getOracleMinOutputHoney(amount);
-        // Take the higher of spot-based and oracle-based minimums
-        minOutput = oracleMin > spotMin ? oracleMin : spotMin;
+            honeyReceived = IApiaryKodiakAdapter(kodiakAdapter).swap(
+                address(ibgtToken),
+                address(honeyToken),
+                amount,
+                minOutput,
+                address(this)
+            );
+        } catch {
+            // Direct pair doesn't exist — use multi-hop iBGT → WBERA → HONEY
+            address[] memory path = new address[](3);
+            path[0] = address(ibgtToken);
+            path[1] = WBERA;
+            path[2] = address(honeyToken);
 
-        // Approve Kodiak adapter
-        ibgtToken.forceApprove(kodiakAdapter, amount);
+            uint256 expectedOut = IApiaryKodiakAdapter(kodiakAdapter).getExpectedMultiHopOutput(path, amount);
+            uint256 spotMin = _calculateMinOutput(expectedOut);
+            uint256 oracleMin = _getOracleMinOutputHoney(amount);
+            uint256 minOutput = oracleMin > spotMin ? oracleMin : spotMin;
 
-        // Use typed interface for swap
-        honeyReceived = IApiaryKodiakAdapter(kodiakAdapter).swap(
-            address(ibgtToken),
-            address(honeyToken),
-            amount,
-            minOutput,
-            address(this)
-        );
+            honeyReceived = IApiaryKodiakAdapter(kodiakAdapter).swapMultiHop(
+                path,
+                amount,
+                minOutput,
+                address(this)
+            );
+        }
 
         // Verify we received tokens
         if (honeyReceived == 0) {
@@ -830,30 +932,48 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
 
         if (amount == 0) return 0;
 
-        // FIX (Finding 2): Use oracle-based price floor for sandwich resistance
-        uint256 minOutput;
-        uint256 spotExpected = IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
+        // V2 FIX: Try direct iBGT/APIARY swap first; if no pair exists, fall back to
+        // multi-hop iBGT → WBERA → HONEY → APIARY. APIARY is a new token that only has
+        // a Kodiak pair with HONEY (the protocol-owned V2 pair).
+        ibgtToken.forceApprove(kodiakAdapter, amount);
+
+        // Try direct swap first
+        try IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
             address(ibgtToken),
             address(apiaryToken),
             amount
-        );
-        uint256 spotMin = _calculateMinOutput(spotExpected);
+        ) returns (uint256 spotExpected) {
+            uint256 spotMin = _calculateMinOutput(spotExpected);
+            uint256 oracleMin = _getOracleMinOutputApiary(amount);
+            uint256 minOutput = oracleMin > spotMin ? oracleMin : spotMin;
 
-        uint256 oracleMin = _getOracleMinOutputApiary(amount);
-        // Take the higher of spot-based and oracle-based minimums
-        minOutput = oracleMin > spotMin ? oracleMin : spotMin;
+            apiaryReceived = IApiaryKodiakAdapter(kodiakAdapter).swap(
+                address(ibgtToken),
+                address(apiaryToken),
+                amount,
+                minOutput,
+                address(this)
+            );
+        } catch {
+            // Direct pair doesn't exist — use multi-hop iBGT → WBERA → HONEY → APIARY
+            address[] memory path = new address[](4);
+            path[0] = address(ibgtToken);
+            path[1] = WBERA;
+            path[2] = address(honeyToken);
+            path[3] = address(apiaryToken);
 
-        // Approve Kodiak adapter
-        ibgtToken.forceApprove(kodiakAdapter, amount);
+            uint256 expectedOut = IApiaryKodiakAdapter(kodiakAdapter).getExpectedMultiHopOutput(path, amount);
+            uint256 spotMin = _calculateMinOutput(expectedOut);
+            uint256 oracleMin = _getOracleMinOutputApiary(amount);
+            uint256 minOutput = oracleMin > spotMin ? oracleMin : spotMin;
 
-        // Use typed interface for swap
-        apiaryReceived = IApiaryKodiakAdapter(kodiakAdapter).swap(
-            address(ibgtToken),
-            address(apiaryToken),
-            amount,
-            minOutput,
-            address(this)
-        );
+            apiaryReceived = IApiaryKodiakAdapter(kodiakAdapter).swapMultiHop(
+                path,
+                amount,
+                minOutput,
+                address(this)
+            );
+        }
 
         // Verify we received tokens
         if (apiaryReceived == 0) {
@@ -950,18 +1070,21 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
         // Approve LP tokens
         IERC20(lpToken).forceApprove(kodiakAdapter, lpAmount);
 
-        // Stake LP tokens via adapter - now returns kek_id
-        bytes32 kekId = IApiaryKodiakAdapter(kodiakAdapter).stakeLP(lpToken, lpAmount);
+        // V2 FIX: Try to stake on Kodiak farm. If no farm is registered yet, or staking
+        // otherwise fails, leave the LP tokens in the YieldManager. Owner can manually
+        // recover them via emergencyWithdraw or call this again once a farm is registered.
+        // This makes Phase 1 robust during early protocol stages before farms exist.
+        try IApiaryKodiakAdapter(kodiakAdapter).stakeLP(lpToken, lpAmount) returns (bytes32 kekId) {
+            lpStakeIds[lpToken].push(kekId);
+            isOurKekId[kekId] = true;
+            kekIdToLP[kekId] = lpToken;
 
-        // Track the kek_id for later withdrawal
-        lpStakeIds[lpToken].push(kekId);
-        isOurKekId[kekId] = true;
-        kekIdToLP[kekId] = lpToken;
-
-        // Get lock duration for event
-        uint256 lockDuration = IApiaryKodiakAdapter(kodiakAdapter).getLockDuration(lpToken);
-
-        emit LPStakedOnKodiak(lpToken, kekId, lpAmount, lockDuration);
+            uint256 lockDuration = IApiaryKodiakAdapter(kodiakAdapter).getLockDuration(lpToken);
+            emit LPStakedOnKodiak(lpToken, kekId, lpAmount, lockDuration);
+        } catch {
+            // Farm not available — LP tokens stay in YieldManager
+            emit LPStakeSkipped(lpToken, lpAmount);
+        }
     }
 
     /**
@@ -1064,57 +1187,43 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
                 // Try to swap to iBGT
                 IERC20(rewardToken_).forceApprove(kodiakAdapter, amount);
 
+                // V2 FIX: Try direct, then 2-hop via HONEY, then 3-hop via WBERA→HONEY.
+                // Each fallback is wrapped so a partial swap success doesn't revert the whole tx.
                 try IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
                     rewardToken_,
                     address(ibgtToken),
                     amount
                 ) returns (uint256 expectedOut) {
                     uint256 minOut = _calculateMinOutput(expectedOut);
-                    
-                    uint256 swapped = IApiaryKodiakAdapter(kodiakAdapter).swap(
+                    ibgtReceived += IApiaryKodiakAdapter(kodiakAdapter).swap(
                         rewardToken_,
                         address(ibgtToken),
                         amount,
                         minOut,
                         address(this)
                     );
-                    ibgtReceived += swapped;
                 } catch {
-                    // If direct swap fails, try through HONEY
-                    try IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
-                        rewardToken_,
-                        address(honeyToken),
-                        amount
-                    ) returns (uint256 honeyExpected) {
-                        uint256 minHoney = _calculateMinOutput(honeyExpected);
-                        
-                        uint256 honeyReceived = IApiaryKodiakAdapter(kodiakAdapter).swap(
-                            rewardToken_,
-                            address(honeyToken),
+                    // Try multi-hop: rewardToken → WBERA → HONEY → iBGT (covers all the bases)
+                    address[] memory path = new address[](4);
+                    path[0] = rewardToken_;
+                    path[1] = WBERA;
+                    path[2] = address(honeyToken);
+                    path[3] = address(ibgtToken);
+                    try IApiaryKodiakAdapter(kodiakAdapter).getExpectedMultiHopOutput(path, amount)
+                        returns (uint256 expectedOut)
+                    {
+                        uint256 minOut = _calculateMinOutput(expectedOut);
+                        ibgtReceived += IApiaryKodiakAdapter(kodiakAdapter).swapMultiHop(
+                            path,
                             amount,
-                            minHoney,
-                            address(this)
-                        );
-
-                        // Swap HONEY to iBGT
-                        honeyToken.forceApprove(kodiakAdapter, honeyReceived);
-                        uint256 ibgtExpected = IApiaryKodiakAdapter(kodiakAdapter).getAmountOut(
-                            address(honeyToken),
-                            address(ibgtToken),
-                            honeyReceived
-                        );
-                        uint256 minIbgt = _calculateMinOutput(ibgtExpected);
-                        
-                        ibgtReceived += IApiaryKodiakAdapter(kodiakAdapter).swap(
-                            address(honeyToken),
-                            address(ibgtToken),
-                            honeyReceived,
-                            minIbgt,
+                            minOut,
                             address(this)
                         );
                     } catch {
-                        // Cannot swap - send to treasury
-                        IERC20(rewardToken_).safeTransfer(treasury, amount);
+                        // Try 3-hop: rewardToken → HONEY → APIARY (in case reward is APIARY-paired)
+                        // If even that fails, leave the reward in this contract for owner recovery.
+                        // Don't safeTransfer to treasury — that would be the HONEY-stuck pattern again.
+                        emit RewardSwapSkipped(rewardToken_, amount);
                     }
                 }
 
