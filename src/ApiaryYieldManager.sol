@@ -524,10 +524,11 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice V2 FIX: Unstake iBGT from Infrared. iBGT is held in this contract afterwards.
-     * @dev Inverse of stakeFromTreasury. After calling, owner uses emergencyWithdraw to
-     *      send iBGT back to the multisig, which then calls treasury.syncIBGTAccounting()
-     *      with the appropriate surplus amount to update treasury accounting.
+     * @notice V2 FIX: Unstake iBGT from Infrared and return it to the treasury atomically.
+     * @dev Inverse of stakeFromTreasury — symmetric round-trip. Calls adapter.unstake(),
+     *      then pushes the iBGT into the treasury via returnIBGTFromStaking() so that
+     *      _ibgtAccounting.totalStaked is decremented and availableBalance is incremented
+     *      in a single transaction. No intermediate accounting state.
      * @param amount Amount of iBGT to unstake (18 decimals)
      */
     function unstakeFromInfrared(uint256 amount) external whenNotPaused nonReentrant returns (uint256 unstakedAmount) {
@@ -535,9 +536,16 @@ contract ApiaryYieldManager is Ownable2Step, Pausable, ReentrancyGuard {
             revert APIARY__ONLY_KEEPER_OR_OWNER();
         }
         if (amount == 0) revert APIARY__INVALID_AMOUNT();
-        if (infraredAdapter == address(0)) revert APIARY__ADAPTER_NOT_SET();
+        if (treasury == address(0) || infraredAdapter == address(0)) {
+            revert APIARY__ADAPTER_NOT_SET();
+        }
 
         unstakedAmount = IApiaryInfraredAdapter(infraredAdapter).unstake(amount);
+
+        // V3 FIX: Close the loop atomically — push the iBGT back into treasury accounting.
+        ibgtToken.forceApprove(treasury, unstakedAmount);
+        IApiaryTreasury(treasury).returnIBGTFromStaking(unstakedAmount, unstakedAmount);
+
         emit UnstakedFromInfrared(unstakedAmount);
     }
 
